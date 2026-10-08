@@ -28,7 +28,7 @@ export const toggle = (list: string[], status: string): string[] =>
   list.includes(status) ? list.filter(s => s !== status) : [...list, status]
 
 type RawIssue = { iid: number; title: string; labels: string[]; web_url: string; updated_at: string }
-export type AgentMentions = { pane: string; title: string; status: string; mentions: { iid: number; count: number }[] }
+export type AgentMentions = { pane: string; cwd: string; title: string; status: string; mentions: { iid: number; count: number }[] }
 
 // 列出 herdr 裡的 Claude agent，從分頁標題、cwd（gl-<id>- worktree）與使用者自己打的 prompt
 // 抽出 issue 編號；transcript 全文含注入的 memory／git log，雜訊太多所以不掃
@@ -43,8 +43,8 @@ jq -c '.result.snapshot as $s | $s.agents[] | select(.agent == "claude") | . + {
     if [ -n "$id" ] && [ -f "$f" ]; then
       grep -F '"type":"user"' "$f" | jq -r 'select(.type == "user" and (.message.content | type == "string")) | .message.content' 2>/dev/null | grep -v '^<'
     fi
-  } | perl -nle 'print $1 while m{(?:/(?:work_items|issues)/|\\bgl-|#|(?i:issue|work item|票) ?#?)(\\d{2,4})\\b}g' | sort | uniq -c \\
-    | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
+  } | perl -nle 'print $1 while m{(?:/(?:work_items|issues)/|\\bgl-|#|(?i:issue|work item|票) ?#?)(\\d{1,5})\\b}g' | sort | uniq -c \\
+    | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, cwd: ($a.cwd // ""), title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
 done | jq -sc .`
 
 export const toIssue = (raw: RawIssue): Issue => ({
@@ -55,6 +55,10 @@ export const toIssue = (raw: RawIssue): Issue => ({
   updatedAt: raw.updated_at,
   sessions: [],
 })
+
+// 票號只在同一個 GitLab 專案內有意義，只比對同一專案目錄（含其下 worktree）的 session
+export const sameProject = (agentCwd: string, sessionCwd: string): boolean =>
+  agentCwd === sessionCwd || agentCwd.startsWith(`${sessionCwd}/`) || sessionCwd.startsWith(`${agentCwd}/`)
 
 export const attachSessions = (issues: Issue[], agents: AgentMentions[]): Issue[] =>
   issues.map(issue => ({
@@ -101,7 +105,7 @@ async function startSession($: EngineInterface, issue: Issue) {
   const name = sessionName(issue)
   try {
     const cwd = await $.session.cwd()
-    const tab = await $.process.run(['herdr', 'tab', 'create', '--focus', '--cwd', cwd, '--label', name])
+    const tab = await $.process.run(['herdr', 'tab', 'create', '--focus', '--cwd', cwd, '--label', `#${issue.iid}`])
     if (tab.exitCode !== 0) throw new Error(tab.stderr.trim() || `exit ${tab.exitCode}`)
     const pane = (JSON.parse(tab.stdout) as { result: { root_pane: { pane_id: string } } }).result.root_pane.pane_id
     // herdr 的 agent 名稱只收小寫英數、-、_；顯示用的名稱交給 claude -n 與分頁 label
@@ -135,7 +139,11 @@ async function refresh($: EngineInterface) {
     } catch (err) {
       herdrError = String(err)
     }
-    const issues = attachSessions((JSON.parse(res.stdout) as RawIssue[]).map(toIssue), agents)
+    const cwd = await $.session.cwd()
+    const issues = attachSessions(
+      (JSON.parse(res.stdout) as RawIssue[]).map(toIssue),
+      agents.filter(a => sameProject(a.cwd, cwd)),
+    )
     await update($, snapshot, () => ({ issues, fetchedAt, herdrError }))
     $.ui.status(`GL: ${summarize(issues) || '無待辦'}`)
   } catch (err) {

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentName, attachSessions, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { agentName, attachSessions, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -20,8 +20,8 @@ test('狀態列摘要略過已完成', async () => {
 
 test('issue 對上提到它的 herdr session，依提及次數排序', async () => {
   const [a, b] = attachSessions([raw(118, []), raw(5, [])].map(toIssue), [
-    { pane: 'w1:p1', title: '順帶提到', status: 'idle', mentions: [{ iid: 118, count: 1 }] },
-    { pane: 'w1:p2', title: 'Issue 整理', status: 'working', mentions: [{ iid: 118, count: 33 }, { iid: 86, count: 1 }] },
+    { pane: 'w1:p1', cwd: '/r', title: '順帶提到', status: 'idle', mentions: [{ iid: 118, count: 1 }] },
+    { pane: 'w1:p2', cwd: '/r', title: 'Issue 整理', status: 'working', mentions: [{ iid: 118, count: 33 }, { iid: 86, count: 1 }] },
   ])
   expect(a?.sessions.map(s => s.pane)).toEqual(['w1:p2', 'w1:p1'])
   expect(b?.sessions).toEqual([])
@@ -33,7 +33,7 @@ test('/gl-issues 呼叫 glab 並更新面板與狀態列', async ($, on) => {
     argvs.push([...e.argv])
     const stdout = e.argv[0] === 'glab'
       ? JSON.stringify([raw(9, ['進行中'])])
-      : JSON.stringify([{ pane: 'w1:p9', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+      : JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
   on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
@@ -66,4 +66,11 @@ test('herdr agent 名稱符合 herdr 規則（小寫英數、-、_，1-32 字）
   const name = agentName({ ...toIssue(raw(1234, [])), title: '#中文 標題 With Spaces' })
   expect(name).toBe('gl-1234')
   expect(/^[a-z][a-z0-9_-]{0,31}$/.test(name)).toBe(true)
+})
+
+test('只比對同一專案目錄（含其下 worktree）的 session', async () => {
+  expect(sameProject('/git/app', '/git/app')).toBe(true)
+  expect(sameProject('/git/app/.claude/worktrees/x', '/git/app')).toBe(true)
+  expect(sameProject('/git/app', '/git/app/sub')).toBe(true)
+  expect(sameProject('/git/app-bot', '/git/app')).toBe(false)
 })
