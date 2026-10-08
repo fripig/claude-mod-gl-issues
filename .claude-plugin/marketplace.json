@@ -9,5 +9,5 @@
       "source": "./"
     }
   ],
-  "description": "Pane listing GitLab issues assigned to me, grouped by board status label"
+  "description": "Pane listing GitLab/GitHub issues assigned to me, grouped by board status label"
 }

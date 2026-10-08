@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentName, attachSessions, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { agentName, attachSessions, detectProvider, fromGitHub, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -27,22 +27,58 @@ test('issue 對上提到它的 herdr session，依提及次數排序', async () 
   expect(b?.sessions).toEqual([])
 })
 
-test('/gl-issues 呼叫 glab 並更新面板與狀態列', async ($, on) => {
+const runCommand = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], remote: string, issuesJson: string) => {
   const argvs: string[][] = []
+  const statuses: string[] = []
   on('process.run', async (_$, e) => {
     argvs.push([...e.argv])
-    const stdout = e.argv[0] === 'glab'
-      ? JSON.stringify([raw(9, ['進行中'])])
-      : JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+    const stdout = e.argv[0] === 'git'
+      ? `${remote}\n`
+      : e.argv[0] === 'bash'
+        ? JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+        : issuesJson
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
   on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
-  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.status', async (_$, e) => {
+    statuses.push(String((e as { text?: unknown }).text ?? JSON.stringify(e)))
+    return { value: undefined } as never
+  })
   on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
   const res = await $.command.run({ command: 'gl-issues', args: '' })
-  expect(argvs[0]?.slice(0, 3)).toEqual(['glab', 'issue', 'list'])
-  expect(argvs[1]?.[0]).toBe('bash')
+  return { argvs, statuses, res }
+}
+
+test('/gl-issues 在 GitLab repo 呼叫 glab 並更新面板與狀態列', async ($, on) => {
+  const { argvs, statuses, res } = await runCommand($, on, 'git@gitlab.example.com:team/app.git', JSON.stringify([raw(9, ['進行中'])]))
+  const issueCall = argvs.find(a => a[0] !== 'git' && a[0] !== 'bash')
+  expect(issueCall?.slice(0, 3)).toEqual(['glab', 'issue', 'list'])
+  expect(argvs.some(a => a[0] === 'bash')).toBe(true)
+  expect(statuses.join('|')).toContain('GL: 進行中 1')
   expect(JSON.stringify(res)).toContain('GitLab issue')
+})
+
+test('/gl-issues 在 GitHub repo 改用 gh', async ($, on) => {
+  const gh = [{ number: 9, title: 't9', labels: [{ name: '檢驗中' }], url: 'https://github.com/o/r/issues/9', updatedAt: '' }]
+  const { argvs, statuses, res } = await runCommand($, on, 'https://github.com/o/r.git', JSON.stringify(gh))
+  const issueCall = argvs.find(a => a[0] !== 'git' && a[0] !== 'bash')
+  expect(issueCall?.slice(0, 3)).toEqual(['gh', 'issue', 'list'])
+  expect(statuses.join('|')).toContain('GH: 檢驗中 1')
+  expect(JSON.stringify(res)).toContain('GitHub issue')
+})
+
+test('依 origin URL 判斷 GitHub／GitLab', async () => {
+  expect(detectProvider('https://github.com/fripig/x.git')).toBe('github')
+  expect(detectProvider('git@github.com:fripig/x.git')).toBe('github')
+  expect(detectProvider('git@gitlab.com:fripig/x.git')).toBe('gitlab')
+  expect(detectProvider('https://git.company.tw/team/x.git')).toBe('gitlab')
+  expect(detectProvider('')).toBe('gitlab')
+})
+
+test('GitHub issue 轉成共用格式，label 照樣分組', async () => {
+  const issue = toIssue(fromGitHub({ number: 3, title: 'x', labels: [{ name: 'bug' }, { name: '可處理' }], url: 'u', updatedAt: 'd' }))
+  expect(issue).toEqual({ iid: 3, title: 'x', status: '可處理', url: 'u', updatedAt: 'd', sessions: [] })
 })
 
 test('session 名以 #<iid> 開頭（讓刷新時對得回 issue），過長截斷', async () => {

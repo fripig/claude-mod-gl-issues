@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Issue, SessionRef, Snapshot } from '../types'
+import type { Issue, Provider, SessionRef, Snapshot } from '../types'
 
 const PANE = 'gl-issues'
 const REFRESH_MS = 5 * 60 * 1000
@@ -28,6 +28,45 @@ export const toggle = (list: string[], status: string): string[] =>
   list.includes(status) ? list.filter(s => s !== status) : [...list, status]
 
 type RawIssue = { iid: number; title: string; labels: string[]; web_url: string; updated_at: string }
+type GitHubIssue = { number: number; title: string; labels: { name: string }[]; url: string; updatedAt: string }
+
+export const fromGitHub = (gh: GitHubIssue): RawIssue => ({
+  iid: gh.number,
+  title: gh.title,
+  labels: gh.labels.map(l => l.name),
+  web_url: gh.url,
+  updated_at: gh.updatedAt,
+})
+
+// 兩邊共用同名狀態 label，只差在用哪支 CLI 抓、JSON 長什麼樣
+export const PROVIDERS: Record<Provider, { name: string; short: string; argv: string[]; parse: (stdout: string) => RawIssue[] }> = {
+  gitlab: {
+    name: 'GitLab',
+    short: 'GL',
+    argv: ['glab', 'issue', 'list', '--assignee=@me', '--per-page', '100', '--output', 'json'],
+    parse: stdout => JSON.parse(stdout) as RawIssue[],
+  },
+  github: {
+    name: 'GitHub',
+    short: 'GH',
+    argv: ['gh', 'issue', 'list', '--assignee', '@me', '--state', 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
+    parse: stdout => (JSON.parse(stdout) as GitHubIssue[]).map(fromGitHub),
+  },
+}
+
+// origin 指到 github.com 就用 gh，其餘（含自架 GitLab）用 glab
+export const detectProvider = (remoteUrl: string): Provider => (/github\.com[:/]/i.test(remoteUrl) ? 'github' : 'gitlab')
+
+async function currentProvider($: EngineInterface): Promise<Provider> {
+  try {
+    const res = await $.process.run(['git', '-C', await $.session.cwd(), 'remote', 'get-url', 'origin'], { timeoutMs: 5000 })
+    return detectProvider(res.exitCode === 0 ? res.stdout.trim() : '')
+  } catch {
+    return 'gitlab'
+  }
+}
+
+const paneTitle = (provider: Provider): string => `${PROVIDERS[provider].name} issues`
 export type AgentMentions = { pane: string; cwd: string; title: string; status: string; mentions: { iid: number; count: number }[] }
 
 // 列出 herdr 裡的 Claude agent，從分頁標題、cwd（gl-<id>- worktree）與使用者自己打的 prompt
@@ -124,11 +163,10 @@ async function startSession($: EngineInterface, issue: Issue) {
 
 async function refresh($: EngineInterface) {
   const fetchedAt = new Date(await $.clock.now()).toLocaleTimeString('zh-TW', { hour12: false })
+  const provider = await currentProvider($)
+  const p = PROVIDERS[provider]
   try {
-    const res = await $.process.run(
-      ['glab', 'issue', 'list', '--assignee=@me', '--per-page', '100', '--output', 'json'],
-      { timeoutMs: 30000 },
-    )
+    const res = await $.process.run(p.argv, { timeoutMs: 30000 })
     if (res.exitCode !== 0) throw new Error(res.stderr.trim().split('\n')[0] || `exit ${res.exitCode}`)
     let agents: AgentMentions[] = []
     let herdrError: string | undefined
@@ -141,30 +179,31 @@ async function refresh($: EngineInterface) {
     }
     const cwd = await $.session.cwd()
     const issues = attachSessions(
-      (JSON.parse(res.stdout) as RawIssue[]).map(toIssue),
+      p.parse(res.stdout).map(toIssue),
       agents.filter(a => sameProject(a.cwd, cwd)),
     )
-    await update($, snapshot, () => ({ issues, fetchedAt, herdrError }))
-    $.ui.status(`GL: ${summarize(issues) || '無待辦'}`)
+    await update($, snapshot, () => ({ provider, issues, fetchedAt, herdrError }))
+    $.ui.status(`${p.short}: ${summarize(issues) || '無待辦'}`)
   } catch (err) {
-    await update($, snapshot, prev => ({ issues: prev?.issues ?? [], fetchedAt, error: String(err) }))
-    $.ui.status('GL: 讀取失敗')
+    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], fetchedAt, error: String(err) }))
+    $.ui.status(`${p.short}: 讀取失敗`)
   }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitLab issue 面板' })
+    await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
     void refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($))
-    void $.ui.open({ id: PANE, title: 'GitLab issues' })
+    void currentProvider($).then(provider => $.ui.open({ id: PANE, title: paneTitle(provider) }))
     return next(e)
   })
 
   on('command.run', { command: 'gl-issues' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'GitLab issues' })
+    const provider = await currentProvider($)
+    await $.ui.open({ id: PANE, title: paneTitle(provider) })
     await refresh($)
-    return { text: 'GitLab issue 面板已開啟並重新整理。' }
+    return { text: `${PROVIDERS[provider].name} issue 面板已開啟並重新整理。` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -188,7 +227,7 @@ export const register: Register = on => {
             </Button>
           )}
         </Box>
-        {snap?.error && <Text color="red">glab 失敗：{snap.error}</Text>}
+        {snap?.error && <Text color="red">{PROVIDERS[snap.provider].argv[0]} 失敗：{snap.error}</Text>}
         {snap?.herdrError && <Text dimColor>herdr 比對略過：{snap.herdrError}</Text>}
         {snap && snap.issues.length === 0 && !snap.error && <Text dimColor>沒有指派給你的 open issue。</Text>}
         {groups.map(([status, list]) => (
