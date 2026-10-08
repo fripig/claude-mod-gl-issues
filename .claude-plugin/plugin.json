@@ -1,0 +1,11 @@
+{
+  "name": "gl-issues",
+  "version": "0.1.0",
+  "description": "Pane listing GitLab issues assigned to me, grouped by board status label",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "fripig"
+  },
+  "repository": "https://github.com/fripig/claude-mod-gl-issues",
+  "license": "MIT"
+}

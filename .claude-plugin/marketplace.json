@@ -1,0 +1,13 @@
+{
+  "name": "claude-mod-gl-issues",
+  "owner": {
+    "name": "fripig"
+  },
+  "plugins": [
+    {
+      "name": "gl-issues",
+      "source": "./"
+    }
+  ],
+  "description": "Pane listing GitLab issues assigned to me, grouped by board status label"
+}
