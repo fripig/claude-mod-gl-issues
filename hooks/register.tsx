@@ -90,9 +90,9 @@ export const sessionName = (issue: Issue): string => {
   return name.length > 40 ? `${name.slice(0, 39)}…` : name
 }
 
+export const agentName = (issue: Issue): string => `gl-${issue.iid}`
+
 const launching = new Set<number>()
-const START_ATTEMPTS = 10
-const START_RETRY_MS = 500
 
 // 開新 herdr 分頁跑 claude，session 名帶 #<iid>，下次刷新時分頁標題就會對回這張 issue
 async function startSession($: EngineInterface, issue: Issue) {
@@ -104,16 +104,11 @@ async function startSession($: EngineInterface, issue: Issue) {
     const tab = await $.process.run(['herdr', 'tab', 'create', '--focus', '--cwd', cwd, '--label', name])
     if (tab.exitCode !== 0) throw new Error(tab.stderr.trim() || `exit ${tab.exitCode}`)
     const pane = (JSON.parse(tab.stdout) as { result: { root_pane: { pane_id: string } } }).result.root_pane.pane_id
-    // 新分頁的 shell 還沒到提示字元時 agent start 會立刻被拒，等一下再試
-    let started = { exitCode: 1, stderr: '', stdout: '' }
-    for (let attempt = 0; attempt < START_ATTEMPTS; attempt++) {
-      if (attempt > 0) await $.clock.sleep(START_RETRY_MS)
-      started = await $.process.run(
-        ['herdr', 'agent', 'start', name, '--kind', 'claude', '--pane', pane, '--', '-n', name],
-        { timeoutMs: 60000 },
-      )
-      if (started.exitCode === 0) break
-    }
+    // herdr 的 agent 名稱只收小寫英數、-、_；顯示用的名稱交給 claude -n 與分頁 label
+    const started = await $.process.run(
+      ['herdr', 'agent', 'start', agentName(issue), '--kind', 'claude', '--pane', pane, '--', '-n', name],
+      { timeoutMs: 60000 },
+    )
     if (started.exitCode !== 0) throw new Error(started.stderr.trim() || started.stdout.trim() || `exit ${started.exitCode}`)
     await refresh($)
   } catch (err) {

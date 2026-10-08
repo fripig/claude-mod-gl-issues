@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { attachSessions, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { agentName, attachSessions, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -60,4 +60,10 @@ test('收合切換：有就移除、沒有就加入', async () => {
 test('已上線待檢驗是獨立狀態，排在正式站待檢驗之後', async () => {
   const issues = [raw(1, ['可處理']), raw(2, ['已上線待檢驗']), raw(3, ['正式站待檢驗'])].map(toIssue)
   expect(groupByStatus(issues).map(([s]) => s)).toEqual(['正式站待檢驗', '已上線待檢驗', '可處理'])
+})
+
+test('herdr agent 名稱符合 herdr 規則（小寫英數、-、_，1-32 字）', async () => {
+  const name = agentName({ ...toIssue(raw(1234, [])), title: '#中文 標題 With Spaces' })
+  expect(name).toBe('gl-1234')
+  expect(/^[a-z][a-z0-9_-]{0,31}$/.test(name)).toBe(true)
 })
