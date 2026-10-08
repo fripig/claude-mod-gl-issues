@@ -56,3 +56,8 @@ test('收合切換：有就移除、沒有就加入', async () => {
   expect(toggle(['已完成'], '已完成')).toEqual([])
   expect(toggle(['已完成'], '進行中')).toEqual(['已完成', '進行中'])
 })
+
+test('已上線待檢驗是獨立狀態，排在正式站待檢驗之後', async () => {
+  const issues = [raw(1, ['可處理']), raw(2, ['已上線待檢驗']), raw(3, ['正式站待檢驗'])].map(toIssue)
+  expect(groupByStatus(issues).map(([s]) => s)).toEqual(['正式站待檢驗', '已上線待檢驗', '可處理'])
+})

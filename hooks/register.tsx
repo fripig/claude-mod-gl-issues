@@ -5,8 +5,9 @@ import type { Issue, SessionRef, Snapshot } from '../types'
 
 const PANE = 'gl-issues'
 const REFRESH_MS = 5 * 60 * 1000
-// issue board 的狀態 label，依流程順序；換成自己 board 的 label
-export const STATUSES = ['進行中', '檢驗中', '測試站待檢驗', '正式站待檢驗', '可處理', '討論中', '已完成']
+// issue board 的狀態 label，依流程順序；換成自己 board 的 label。
+// 已上線待檢驗給沒有測試站的專案用（測試站／正式站待檢驗合併成一個）
+export const STATUSES = ['進行中', '檢驗中', '測試站待檢驗', '正式站待檢驗', '已上線待檢驗', '可處理', '討論中', '已完成']
 const NO_STATUS = '（無狀態）'
 // 狀態 label 用亮色區分；已完成刻意不上色、改淡色
 export const STATUS_COLOR: Record<string, string> = {
@@ -14,6 +15,7 @@ export const STATUS_COLOR: Record<string, string> = {
   檢驗中: '#facc15',
   測試站待檢驗: '#22d3ee',
   正式站待檢驗: '#c084fc',
+  已上線待檢驗: '#60a5fa',
   可處理: '#fb923c',
   討論中: '#f472b6',
 }
