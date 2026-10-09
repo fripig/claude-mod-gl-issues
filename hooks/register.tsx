@@ -117,7 +117,7 @@ const STATUS_MARK: Record<string, string> = { working: '◑', blocked: '!', done
 
 export const groupByStatus = (issues: Issue[]): [string, Issue[]][] =>
   [...STATUSES, NO_STATUS]
-    .map(s => [s, issues.filter(i => i.status === s)] as [string, Issue[]])
+    .map(s => [s, issues.filter(i => i.status === s).sort((x, y) => x.iid - y.iid)] as [string, Issue[]])
     .filter(([, list]) => list.length > 0)
 
 export const summarize = (issues: Issue[]): string =>

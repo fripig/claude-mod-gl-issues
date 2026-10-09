@@ -124,3 +124,8 @@ test('票號按鈕用系統預設瀏覽器開 issue 頁面，網址以參數傳�
   expect(argv[argv.length - 1]).toBe('https://github.com/o/r/issues/1?a=$(x)')
   expect(argv[2]).not.toContain('github.com')
 })
+
+test('同一狀態內依票號由小到大排列', async () => {
+  const issues = [raw(30, ['進行中']), raw(4, ['進行中']), raw(118, ['進行中']), raw(12, ['進行中'])].map(toIssue)
+  expect(groupByStatus(issues)[0]?.[1].map(i => i.iid)).toEqual([4, 12, 30, 118])
+})
