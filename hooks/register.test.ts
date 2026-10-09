@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { OPEN_URL_ARGV, agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -116,4 +116,11 @@ test('新 session 的初始 prompt 依來源用對的 CLI 讀 issue，並帶 #<i
   expect(initialPrompt('github', issue)).toContain('`gh issue view 12 --json title,body,labels,comments`')
   expect(initialPrompt('gitlab', issue)).toContain('`glab issue view 12 --comments`')
   expect(initialPrompt('github', issue)).toContain('#12')
+})
+
+test('票號按鈕用系統預設瀏覽器開 issue 頁面，網址以參數傳入不經 shell 拼接', async () => {
+  const argv = OPEN_URL_ARGV('https://github.com/o/r/issues/1?a=$(x)')
+  expect(argv[0]).toBe('bash')
+  expect(argv[argv.length - 1]).toBe('https://github.com/o/r/issues/1?a=$(x)')
+  expect(argv[2]).not.toContain('github.com')
 })

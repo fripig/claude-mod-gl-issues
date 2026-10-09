@@ -126,6 +126,15 @@ export const summarize = (issues: Issue[]): string =>
     .map(([s, list]) => `${s} ${list.length}`)
     .join(' · ')
 
+// 終端機的 OSC 8 連結要看終端機（與 herdr）支不支援、常要按 Cmd；票號改用按鈕直接叫系統開瀏覽器
+export const OPEN_URL_ARGV = (url: string): string[] =>
+  ['bash', '-c', 'if command -v open >/dev/null; then open "$1"; else xdg-open "$1"; fi', '_', url]
+
+async function openIssue($: EngineInterface, issue: Issue) {
+  const res = await $.process.run(OPEN_URL_ARGV(issue.url))
+  if (res.exitCode !== 0) $.ui.toast(`開啟 issue 頁面失敗：${res.stderr.trim() || res.exitCode}`)
+}
+
 async function focusSession($: EngineInterface, ref: SessionRef) {
   const res = await $.process.run(['herdr', 'agent', 'focus', ref.pane])
   if (res.exitCode !== 0) $.ui.toast(`herdr 切換失敗：${res.stderr.trim() || res.exitCode}`)
@@ -254,20 +263,19 @@ export const register: Register = on => {
               </Box>
               {!closed.includes(status) && list.map(i => (
                 <Box flexDirection="column">
-                  {i.sessions.length > 0 ? (
-                    <Text wrap="truncate-end">
-                      <Link href={i.url}>#{i.iid}</Link> {i.title}
-                    </Text>
-                  ) : (
-                    <Box flexDirection="row" gap={1}>
+                  <Box flexDirection="row" gap={1}>
+                    <Button key={`open-${i.iid}`} onPress={() => void openIssue($, i)}>
+                      {`#${i.iid}`}
+                    </Button>
+                    {i.sessions.length === 0 && (
                       <Button key={`start-${i.iid}`} onPress={() => void startSession($, snap.provider, i)}>
-                        {`#${i.iid} ▶`}
+                        ▶
                       </Button>
-                      <Text wrap="truncate-end">
-                        <Link href={i.url}>{i.title}</Link>
-                      </Text>
-                    </Box>
-                  )}
+                    )}
+                    <Text wrap="truncate-end">
+                      <Link href={i.url}>{i.title}</Link>
+                    </Text>
+                  </Box>
                   {i.sessions.map(ref => (
                     <Button key={`${i.iid}-${ref.pane}`} onPress={() => void focusSession($, ref)}>
                       {`  ↪ ${STATUS_MARK[ref.status] ?? '·'} ${ref.title || ref.pane}`}
