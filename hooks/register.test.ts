@@ -20,8 +20,8 @@ test('狀態列摘要略過已完成', async () => {
 
 test('issue 對上提到它的 herdr session，依提及次數排序', async () => {
   const [a, b] = attachSessions([raw(118, []), raw(5, [])].map(toIssue), [
-    { pane: 'w1:p1', cwd: '/r', title: '順帶提到', status: 'idle', mentions: [{ iid: 118, count: 1 }] },
-    { pane: 'w1:p2', cwd: '/r', title: 'Issue 整理', status: 'working', mentions: [{ iid: 118, count: 33 }, { iid: 86, count: 1 }] },
+    { pane: 'w1:p1', tab: 'w1:t1', cwd: '/r', title: '順帶提到', status: 'idle', mentions: [{ iid: 118, count: 1 }] },
+    { pane: 'w1:p2', tab: 'w1:t2', cwd: '/r', title: 'Issue 整理', status: 'working', mentions: [{ iid: 118, count: 33 }, { iid: 86, count: 1 }] },
   ])
   expect(a?.sessions.map(s => s.pane)).toEqual(['w1:p2', 'w1:p1'])
   expect(b?.sessions).toEqual([])
@@ -35,7 +35,7 @@ const runCommand = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Para
     const stdout = e.argv[0] === 'git'
       ? `${remote}\n`
       : e.argv[0] === 'bash'
-        ? JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+        ? JSON.stringify([{ pane: 'w1:p9', tab: 'w1:t9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
         : issuesJson
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
@@ -130,14 +130,15 @@ test('同一狀態內依票號由小到大排列', async () => {
   expect(groupByStatus(issues)[0]?.[1].map(i => i.iid)).toEqual([4, 12, 30, 118])
 })
 
-test('面板上按 ↪ 會用 herdr agent focus 切到那個 session', async ($, on) => {
+test('面板上按 ↪ 先 tab focus 切畫面、再 agent focus 那個 pane', async ($, on) => {
   const { argvs } = await runCommand($, on, 'https://github.com/o/r.git',
     JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }]))
   for (const surface of ['terminal', 'desktop'] as const) {
     argvs.length = 0
     const ui = await $.ui.mount({ plugin: 'gl-issues', surface, component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
     await ui.press({ key: '9-w1:p9' })
-    expect(argvs).toContainEqual(['herdr', 'agent', 'focus', 'w1:p9'])
+    const herdrCalls = argvs.filter(a => a[0] === 'herdr')
+    expect(herdrCalls).toEqual([['herdr', 'tab', 'focus', 'w1:t9'], ['herdr', 'agent', 'focus', 'w1:p9']])
     await ui.unmount()
   }
 })
@@ -149,7 +150,7 @@ test('herdr focus 啟動不了時跳 toast，不再無聲失敗', async ($, on) 
     const stdout = e.argv[0] === 'git'
       ? 'https://github.com/o/r.git\n'
       : e.argv[0] === 'bash'
-        ? JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+        ? JSON.stringify([{ pane: 'w1:p9', tab: 'w1:t9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
         : JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }])
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })

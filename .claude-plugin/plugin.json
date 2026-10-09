@@ -1,6 +1,6 @@
 {
   "name": "gl-issues",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Pane listing GitLab/GitHub issues assigned to me, grouped by board status label",
   "types": "./types/index.d.ts",
   "author": {

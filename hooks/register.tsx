@@ -70,7 +70,7 @@ async function currentProvider($: EngineInterface): Promise<Provider> {
 }
 
 const paneTitle = (provider: Provider): string => `${PROVIDERS[provider].name} issues`
-export type AgentMentions = { pane: string; cwd: string; title: string; status: string; mentions: { iid: number; count: number }[] }
+export type AgentMentions = { pane: string; tab: string; cwd: string; title: string; status: string; mentions: { iid: number; count: number }[] }
 
 // 列出 herdr 裡的 Claude agent，從分頁標題、cwd（gl-<id>- worktree）與使用者自己打的 prompt
 // 抽出 issue 編號；transcript 全文含注入的 memory／git log，雜訊太多所以不掃
@@ -86,7 +86,7 @@ jq -c '.result.snapshot as $s | $s.agents[] | select(.agent == "claude") | . + {
       grep -F '"type":"user"' "$f" | jq -r 'select(.type == "user" and (.message.content | type == "string")) | .message.content' 2>/dev/null | grep -v '^<'
     fi
   } | perl -nle 'print $1 while m{(?:/(?:work_items|issues)/|\\bgl-|#|(?i:issue|work item|票) ?#?)(\\d{1,5})\\b}g' | sort | uniq -c \\
-    | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, cwd: ($a.cwd // ""), title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
+    | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, tab: ($a.tab_id // ""), cwd: ($a.cwd // ""), title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
 done | jq -sc .`
 
 export const toIssue = (raw: RawIssue): Issue => ({
@@ -108,7 +108,7 @@ export const attachSessions = (issues: Issue[], agents: AgentMentions[]): Issue[
     sessions: agents
       .flatMap((a): SessionRef[] => {
         const hit = a.mentions.find(m => m.iid === issue.iid)
-        return hit ? [{ pane: a.pane, title: a.title, status: a.status, count: hit.count }] : []
+        return hit ? [{ pane: a.pane, tab: a.tab, title: a.title, status: a.status, count: hit.count }] : []
       })
       .sort((x, y) => y.count - x.count),
   }))
@@ -139,11 +139,20 @@ async function openIssue($: EngineInterface, issue: Issue) {
   }
 }
 
+// herdr server 0.9.0 的 agent focus 只改內部焦點、畫面不會切（0.9.3 已修），先 tab focus 切到那個分頁，
+// 再 agent focus 讓分頁裡的對應 pane 拿到焦點（分頁有分割時才有差）
+export const focusArgvs = (ref: SessionRef): string[][] => [
+  ...(ref.tab ? [['herdr', 'tab', 'focus', ref.tab]] : []),
+  ['herdr', 'agent', 'focus', ref.pane],
+]
+
 // 按鈕的 handler 是 void 呼叫，process.run reject（啟動不了、逾時）不接住就會無聲失敗
 async function focusSession($: EngineInterface, ref: SessionRef) {
   try {
-    const res = await $.process.run(['herdr', 'agent', 'focus', ref.pane], { timeoutMs: 10000 })
-    if (res.exitCode !== 0) throw new Error(res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`)
+    for (const argv of focusArgvs(ref)) {
+      const res = await $.process.run(argv, { timeoutMs: 10000 })
+      if (res.exitCode !== 0) throw new Error(res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`)
+    }
   } catch (err) {
     $.ui.toast(`herdr 切換到 ${ref.pane} 失敗：${String(err)}`)
   }
