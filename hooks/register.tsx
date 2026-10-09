@@ -131,13 +131,22 @@ export const OPEN_URL_ARGV = (url: string): string[] =>
   ['bash', '-c', 'if command -v open >/dev/null; then open "$1"; else xdg-open "$1"; fi', '_', url]
 
 async function openIssue($: EngineInterface, issue: Issue) {
-  const res = await $.process.run(OPEN_URL_ARGV(issue.url))
-  if (res.exitCode !== 0) $.ui.toast(`開啟 issue 頁面失敗：${res.stderr.trim() || res.exitCode}`)
+  try {
+    const res = await $.process.run(OPEN_URL_ARGV(issue.url), { timeoutMs: 10000 })
+    if (res.exitCode !== 0) throw new Error(res.stderr.trim() || `exit ${res.exitCode}`)
+  } catch (err) {
+    $.ui.toast(`開啟 issue 頁面失敗：${String(err)}`)
+  }
 }
 
+// 按鈕的 handler 是 void 呼叫，process.run reject（啟動不了、逾時）不接住就會無聲失敗
 async function focusSession($: EngineInterface, ref: SessionRef) {
-  const res = await $.process.run(['herdr', 'agent', 'focus', ref.pane])
-  if (res.exitCode !== 0) $.ui.toast(`herdr 切換失敗：${res.stderr.trim() || res.exitCode}`)
+  try {
+    const res = await $.process.run(['herdr', 'agent', 'focus', ref.pane], { timeoutMs: 10000 })
+    if (res.exitCode !== 0) throw new Error(res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`)
+  } catch (err) {
+    $.ui.toast(`herdr 切換到 ${ref.pane} 失敗：${String(err)}`)
+  }
 }
 
 export const sessionName = (issue: Issue): string => {

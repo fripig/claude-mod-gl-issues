@@ -129,3 +129,40 @@ test('同一狀態內依票號由小到大排列', async () => {
   const issues = [raw(30, ['進行中']), raw(4, ['進行中']), raw(118, ['進行中']), raw(12, ['進行中'])].map(toIssue)
   expect(groupByStatus(issues)[0]?.[1].map(i => i.iid)).toEqual([4, 12, 30, 118])
 })
+
+test('面板上按 ↪ 會用 herdr agent focus 切到那個 session', async ($, on) => {
+  const { argvs } = await runCommand($, on, 'https://github.com/o/r.git',
+    JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }]))
+  for (const surface of ['terminal', 'desktop'] as const) {
+    argvs.length = 0
+    const ui = await $.ui.mount({ plugin: 'gl-issues', surface, component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+    await ui.press({ key: '9-w1:p9' })
+    expect(argvs).toContainEqual(['herdr', 'agent', 'focus', 'w1:p9'])
+    await ui.unmount()
+  }
+})
+
+test('herdr focus 啟動不了時跳 toast，不再無聲失敗', async ($, on) => {
+  const toasts: string[] = []
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'herdr') throw new Error('spawn herdr ENOENT')
+    const stdout = e.argv[0] === 'git'
+      ? 'https://github.com/o/r.git\n'
+      : e.argv[0] === 'bash'
+        ? JSON.stringify([{ pane: 'w1:p9', cwd: '/r', title: 'gl-9', status: 'idle', mentions: [{ iid: 9, count: 2 }] }])
+        : JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }])
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  on('ui.toast', async (_$, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
+  await $.command.run({ command: 'gl-issues', args: '' })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  await ui.press({ key: '9-w1:p9' })
+  expect(toasts.join('|')).toContain('herdr 切換到 w1:p9 失敗')
+})
