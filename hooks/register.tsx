@@ -39,18 +39,21 @@ export const fromGitHub = (gh: GitHubIssue): RawIssue => ({
 })
 
 // 兩邊共用同名狀態 label，只差在用哪支 CLI 抓、JSON 長什麼樣
-export const PROVIDERS: Record<Provider, { name: string; short: string; argv: string[]; parse: (stdout: string) => RawIssue[] }> = {
+export const PROVIDERS: Record<Provider, { name: string; short: string; argv: string[]; parse: (stdout: string) => RawIssue[]; view: (iid: number) => string }> = {
   gitlab: {
     name: 'GitLab',
     short: 'GL',
     argv: ['glab', 'issue', 'list', '--assignee=@me', '--per-page', '100', '--output', 'json'],
     parse: stdout => JSON.parse(stdout) as RawIssue[],
+    view: iid => `glab issue view ${iid} --comments`,
   },
   github: {
     name: 'GitHub',
     short: 'GH',
     argv: ['gh', 'issue', 'list', '--assignee', '@me', '--state', 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
     parse: stdout => (JSON.parse(stdout) as GitHubIssue[]).map(fromGitHub),
+    // gh issue view --comments 會查已停用的 Projects (classic) 而失敗，改用 --json
+    view: iid => `gh issue view ${iid} --json title,body,labels,comments`,
   },
 }
 
@@ -135,10 +138,16 @@ export const sessionName = (issue: Issue): string => {
 
 export const agentName = (issue: Issue): string => `gl-${issue.iid}`
 
+// 新 session 的第一句話：讓 Claude 自己用 CLI 讀 issue（含留言），摘要完先停下等指示
+export const initialPrompt = (provider: Provider, issue: Issue): string => {
+  const view = PROVIDERS[provider].view(issue.iid)
+  return `請先用 \`${view}\` 讀取 issue #${issue.iid}（${issue.title}）的內容與留言，摘要需求、驗收條件與待釐清的地方。摘要完先停下來等我指示，不要開始改程式碼。`
+}
+
 const launching = new Set<number>()
 
 // 開新 herdr 分頁跑 claude，session 名帶 #<iid>，下次刷新時分頁標題就會對回這張 issue
-async function startSession($: EngineInterface, issue: Issue) {
+async function startSession($: EngineInterface, provider: Provider, issue: Issue) {
   if (launching.has(issue.iid)) return
   launching.add(issue.iid)
   const name = sessionName(issue)
@@ -153,6 +162,9 @@ async function startSession($: EngineInterface, issue: Issue) {
       { timeoutMs: 60000 },
     )
     if (started.exitCode !== 0) throw new Error(started.stderr.trim() || started.stdout.trim() || `exit ${started.exitCode}`)
+    // 初始 prompt 等 claude 就緒後才送進輸入框，不經 shell，標題裡的引號、$ 不會被解讀
+    const prompted = await $.process.run(['herdr', 'agent', 'prompt', pane, initialPrompt(provider, issue)])
+    if (prompted.exitCode !== 0) throw new Error(prompted.stderr.trim() || prompted.stdout.trim() || `exit ${prompted.exitCode}`)
     await refresh($)
   } catch (err) {
     $.ui.toast(`開 session 失敗：${String(err)}`)
@@ -248,7 +260,7 @@ export const register: Register = on => {
                     </Text>
                   ) : (
                     <Box flexDirection="row" gap={1}>
-                      <Button key={`start-${i.iid}`} onPress={() => void startSession($, i)}>
+                      <Button key={`start-${i.iid}`} onPress={() => void startSession($, snap.provider, i)}>
                         {`#${i.iid} ▶`}
                       </Button>
                       <Text wrap="truncate-end">

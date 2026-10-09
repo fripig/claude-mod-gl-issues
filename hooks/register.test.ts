@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentName, attachSessions, detectProvider, fromGitHub, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -109,4 +109,11 @@ test('只比對同一專案目錄（含其下 worktree）的 session', async () 
   expect(sameProject('/git/app/.claude/worktrees/x', '/git/app')).toBe(true)
   expect(sameProject('/git/app', '/git/app/sub')).toBe(true)
   expect(sameProject('/git/app-bot', '/git/app')).toBe(false)
+})
+
+test('新 session 的初始 prompt 依來源用對的 CLI 讀 issue，並帶 #<iid> 方便對回', async () => {
+  const issue = toIssue(raw(12, []))
+  expect(initialPrompt('github', issue)).toContain('`gh issue view 12 --json title,body,labels,comments`')
+  expect(initialPrompt('gitlab', issue)).toContain('`glab issue view 12 --comments`')
+  expect(initialPrompt('github', issue)).toContain('#12')
 })
