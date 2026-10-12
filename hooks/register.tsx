@@ -168,7 +168,7 @@ export const agentName = (issue: Issue): string => `gl-${issue.iid}`
 // 新 session 的第一句話：讓 Claude 自己用 CLI 讀 issue（含留言），摘要完先停下等指示
 export const initialPrompt = (provider: Provider, issue: Issue): string => {
   const view = PROVIDERS[provider].view(issue.iid)
-  return `請先用 \`${view}\` 讀取 issue #${issue.iid}（${issue.title}）的內容與留言，摘要需求、驗收條件與待釐清的地方。摘要完先停下來等我指示，不要開始改程式碼。`
+  return `請先用 \`${view}\` 讀取 issue #${issue.iid} 的內容與留言，摘要需求、驗收條件與待釐清的地方。摘要完先停下來等我指示，不要開始改程式碼。`
 }
 
 const launching = new Set<number>()

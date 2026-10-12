@@ -116,6 +116,7 @@ test('新 session 的初始 prompt 依來源用對的 CLI 讀 issue，並帶 #<i
   expect(initialPrompt('github', issue)).toContain('`gh issue view 12 --json title,body,labels,comments`')
   expect(initialPrompt('gitlab', issue)).toContain('`glab issue view 12 --comments`')
   expect(initialPrompt('github', issue)).toContain('#12')
+  expect(initialPrompt('github', issue)).not.toContain(issue.title)
 })
 
 test('票號按鈕用系統預設瀏覽器開 issue 頁面，網址以參數傳入不經 shell 拼接', async () => {
