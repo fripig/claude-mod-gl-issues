@@ -2,10 +2,11 @@ export type SessionRef = { pane: string; tab: string; title: string; status: str
 export type Issue = { iid: number; title: string; status: string; url: string; updatedAt: string; sessions: SessionRef[] }
 export type Provider = 'github' | 'gitlab'
 export type Tab = 'mine' | 'others' | 'closed'
-export type Snapshot = { provider: Provider; issues: Issue[]; others: Issue[]; closed: Issue[]; fetchedAt: string; error?: string; herdrError?: string; othersError?: string; closedError?: string }
+export type Board = { statuses: string[]; colors: Record<string, string>; done: string }
+export type Snapshot = { provider: Provider; board: Board; issues: Issue[]; others: Issue[]; closed: Issue[]; fetchedAt: string; error?: string; herdrError?: string; othersError?: string; closedError?: string }
 
 declare module 'claude-code' {
   interface PluginState {
-    'gl-issues': { snapshot: Snapshot | null; collapsed: string[]; tab: Tab }
+    'gl-issues': { snapshot: Snapshot | null; collapsed: string[] | null; tab: Tab }
   }
 }

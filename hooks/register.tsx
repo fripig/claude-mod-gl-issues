@@ -1,28 +1,79 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Issue, Provider, SessionRef, Snapshot, Tab } from '../types'
+import type { Board, Issue, Provider, SessionRef, Snapshot, Tab } from '../types'
 
 const PANE = 'gl-issues'
 const REFRESH_MS = 5 * 60 * 1000
-// issue board 的狀態 label，依流程順序；換成自己 board 的 label。
-// 已上線待檢驗給沒有測試站的專案用（測試站／正式站待檢驗合併成一個）
-export const STATUSES = ['進行中', '檢驗中', '測試站待檢驗', '正式站待檢驗', '已上線待檢驗', '可處理', '討論中', '已完成']
 const NO_STATUS = '（無狀態）'
-// 狀態 label 用亮色區分；已完成刻意不上色、改淡色
-export const STATUS_COLOR: Record<string, string> = {
-  進行中: '#4ade80',
-  檢驗中: '#facc15',
-  測試站待檢驗: '#22d3ee',
-  正式站待檢驗: '#c084fc',
-  已上線待檢驗: '#60a5fa',
-  可處理: '#fb923c',
-  討論中: '#f472b6',
+// 沒指定顏色的狀態依序取用的亮色
+const PALETTE = ['#4ade80', '#facc15', '#22d3ee', '#c084fc', '#60a5fa', '#fb923c', '#f472b6']
+
+// 狀態 label 依流程排序；最後一項當作完成狀態：不上色、改淡色、預設收合
+export const makeBoard = (entries: { name: string; color?: string }[]): Board => {
+  const done = entries[entries.length - 1]?.name ?? ''
+  const colors: Record<string, string> = {}
+  entries.filter(e => e.name !== done).forEach((e, i) => {
+    colors[e.name] = e.color ?? PALETTE[i % PALETTE.length]!
+  })
+  return { statuses: entries.map(e => e.name), colors, done }
+}
+
+// 專案 CLAUDE.md 沒寫「## Issue 狀態」時用這組；已上線待檢驗給沒有測試站的專案用
+export const DEFAULT_BOARD = makeBoard(
+  ['進行中', '檢驗中', '測試站待檢驗', '正式站待檢驗', '已上線待檢驗', '可處理', '討論中', '已完成'].map(name => ({ name })),
+)
+
+// 從 CLAUDE.md 的「## Issue 狀態」標題下讀清單項目，一項一個 label，可在後面接 #色碼；讀到下一個標題為止
+export const parseBoard = (markdown: string): Board | undefined => {
+  const lines = markdown.split('\n')
+  const start = lines.findIndex(l => /^#{1,6}\s*issue\s*狀態\s*$/i.test(l.trim()))
+  if (start < 0) return undefined
+  const entries: { name: string; color?: string }[] = []
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,6}\s/.test(line.trim())) break
+    const m = /^\s*[-*+]\s+(.+?)(?:\s+(#[0-9a-f]{3}(?:[0-9a-f]{3})?))?\s*$/i.exec(line)
+    if (m?.[1]) entries.push(m[2] ? { name: m[1], color: m[2] } : { name: m[1] })
+  }
+  return entries.length > 0 ? makeBoard(entries) : undefined
+}
+
+async function loadBoard($: EngineInterface, cwd: string): Promise<Board> {
+  for (const path of [`${cwd}/CLAUDE.md`, `${cwd}/.claude/CLAUDE.md`]) {
+    try {
+      const board = parseBoard(await $.fs.read(path))
+      if (board) return board
+    } catch {
+      // 沒有這個檔就看下一個
+    }
+  }
+  return DEFAULT_BOARD
+}
+
+export const boardSection = (board: Board): string =>
+  ['## Issue 狀態', '', ...board.statuses.map(s => `- ${s}`), ''].join('\n')
+
+// 已有的 CLAUDE.md 後面空一行接上狀態段落；沒有就只有這一段
+export const withBoardSection = (existing: string | undefined, board: Board): string =>
+  existing?.trim() ? `${existing.replace(/\s*$/, '')}\n\n${boardSection(board)}` : boardSection(board)
+
+// /gl-issues-init：把預設狀態清單寫進專案 CLAUDE.md，已經寫過就不動
+async function initBoard($: EngineInterface): Promise<string> {
+  const cwd = await $.session.cwd()
+  for (const path of [`${cwd}/CLAUDE.md`, `${cwd}/.claude/CLAUDE.md`]) {
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (text !== undefined && parseBoard(text)) return `${path} 已經有「## Issue 狀態」段落，沒有變更。`
+  }
+  const path = `${cwd}/CLAUDE.md`
+  const existing = await $.fs.read(path).catch(() => undefined)
+  await $.fs.write(path, withBoardSection(existing, DEFAULT_BOARD))
+  await refresh($)
+  return `已在 ${path} ${existing === undefined ? '建立' : '加上'}「## Issue 狀態」段落，改成自己 board 的 label 後按重新整理即可。`
 }
 
 const snapshot = atom({ plugin: 'gl-issues', key: 'snapshot' } as const, null as Snapshot | null)
-// 收合中的狀態分組；已完成預設收起
-const collapsed = atom({ plugin: 'gl-issues', key: 'collapsed' } as const, ['已完成'] as string[])
+// 收合中的狀態分組；還沒動過時（null）只收起完成狀態
+const collapsed = atom({ plugin: 'gl-issues', key: 'collapsed' } as const, null as string[] | null)
 // 面板分頁：指派給我的、同專案其他人的（含未指派）
 const activeTab = atom({ plugin: 'gl-issues', key: 'tab' } as const, 'mine' as Tab)
 
@@ -94,10 +145,10 @@ jq -c '.result.snapshot as $s | $s.agents[] | select(.agent == "claude") | . + {
     | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, tab: ($a.tab_id // ""), cwd: ($a.cwd // ""), title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
 done | jq -sc .`
 
-export const toIssue = (raw: RawIssue): Issue => ({
+export const toIssue = (raw: RawIssue, board: Board = DEFAULT_BOARD): Issue => ({
   iid: raw.iid,
   title: raw.title,
-  status: raw.labels.find(l => STATUSES.includes(l)) ?? NO_STATUS,
+  status: raw.labels.find(l => board.statuses.includes(l)) ?? NO_STATUS,
   url: raw.web_url,
   updatedAt: raw.updated_at,
   sessions: [],
@@ -133,21 +184,21 @@ const EMPTY_TEXT: Record<Tab, string> = {
 const CLOSED_GROUP = '已關閉'
 
 // 已關閉的 issue 狀態 label 多半停在已完成，不分組，新的排前面
-export const groupsFor = (tab: Tab, issues: Issue[]): [string, Issue[]][] =>
+export const groupsFor = (tab: Tab, issues: Issue[], board: Board = DEFAULT_BOARD): [string, Issue[]][] =>
   tab !== 'closed'
-    ? groupByStatus(issues)
+    ? groupByStatus(issues, board)
     : issues.length > 0 ? [[CLOSED_GROUP, [...issues].sort((x, y) => y.iid - x.iid)]] : []
 
 const STATUS_MARK: Record<string, string> = { working: '◑', blocked: '!', done: '✓', idle: '·' }
 
-export const groupByStatus = (issues: Issue[]): [string, Issue[]][] =>
-  [...STATUSES, NO_STATUS]
+export const groupByStatus = (issues: Issue[], board: Board = DEFAULT_BOARD): [string, Issue[]][] =>
+  [...board.statuses, NO_STATUS]
     .map(s => [s, issues.filter(i => i.status === s).sort((x, y) => x.iid - y.iid)] as [string, Issue[]])
     .filter(([, list]) => list.length > 0)
 
-export const summarize = (issues: Issue[]): string =>
-  groupByStatus(issues)
-    .filter(([s]) => s !== '已完成')
+export const summarize = (issues: Issue[], board: Board = DEFAULT_BOARD): string =>
+  groupByStatus(issues, board)
+    .filter(([s]) => s !== board.done)
     .map(([s, list]) => `${s} ${list.length}`)
     .join(' · ')
 
@@ -256,20 +307,23 @@ async function refresh($: EngineInterface) {
     }
     const cwd = await $.session.cwd()
     const local = agents.filter(a => sameProject(a.cwd, cwd))
-    const issues = attachSessions(mine.map(toIssue), local)
+    const board = await loadBoard($, cwd)
+    const build = (raws: RawIssue[]) => attachSessions(raws.map(r => toIssue(r, board)), local)
+    const issues = build(mine)
     await update($, snapshot, prev => ({
       provider,
+      board,
       issues,
-      others: all.raws ? attachSessions(othersOf(all.raws, mine).map(toIssue), local) : prev?.others ?? [],
-      closed: closed.raws ? attachSessions(closed.raws.map(toIssue), local) : prev?.closed ?? [],
+      others: all.raws ? build(othersOf(all.raws, mine)) : prev?.others ?? [],
+      closed: closed.raws ? build(closed.raws) : prev?.closed ?? [],
       fetchedAt,
       herdrError,
       othersError: all.error,
       closedError: closed.error,
     }))
-    $.ui.status(`${p.short}: ${summarize(issues) || '無待辦'}`)
+    $.ui.status(`${p.short}: ${summarize(issues, board) || '無待辦'}`)
   } catch (err) {
-    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], others: prev?.others ?? [], closed: prev?.closed ?? [], fetchedAt, error: String(err) }))
+    await update($, snapshot, prev => ({ provider, board: prev?.board ?? DEFAULT_BOARD, issues: prev?.issues ?? [], others: prev?.others ?? [], closed: prev?.closed ?? [], fetchedAt, error: String(err) }))
     $.ui.status(`${p.short}: 讀取失敗`)
   }
 }
@@ -277,11 +331,14 @@ async function refresh($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
+    await $.command.register({ name: 'gl-issues-init', description: '在專案 CLAUDE.md 寫入預設的 issue 狀態 label 清單' })
     void refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($))
     void currentProvider($).then(provider => $.ui.open({ id: PANE, title: paneTitle(provider) }))
     return next(e)
   })
+
+  on('command.run', { command: 'gl-issues-init' }, async $ => ({ text: await initBoard($) }))
 
   on('command.run', { command: 'gl-issues' }, async $ => {
     const provider = await currentProvider($)
@@ -293,11 +350,12 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const snap = await read($, snapshot)
-    const closed = await read($, collapsed)
+    const board = snap?.board ?? DEFAULT_BOARD
+    const closed = (await read($, collapsed)) ?? [board.done]
     const current = await read($, activeTab)
     const listOf = (s: Snapshot, t: Tab): Issue[] => (t === 'mine' ? s.issues : t === 'others' ? s.others : s.closed)
     const shown = snap ? listOf(snap, current) : []
-    const groups = groupsFor(current, shown)
+    const groups = groupsFor(current, shown, board)
     const allClosed = groups.length > 0 && groups.every(([s]) => closed.includes(s))
 
     return (
@@ -337,10 +395,10 @@ export const register: Register = on => {
         {groups.map(([status, list]) => (
             <Box flexDirection="column">
               <Box flexDirection="row" gap={1}>
-                <Button plain key={`group-${status}`} onPress={() => void update($, collapsed, c => toggle(c, status))}>
+                <Button plain key={`group-${status}`} onPress={() => void update($, collapsed, c => toggle(c ?? [board.done], status))}>
                   {closed.includes(status) ? '▸' : '▾'}
                 </Button>
-                <Text bold color={STATUS_COLOR[status]} dimColor={status === '已完成'}>
+                <Text bold color={board.colors[status]} dimColor={status === board.done}>
                   {status}（{list.length}）
                 </Text>
               </Box>

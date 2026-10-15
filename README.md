@@ -14,7 +14,7 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
 
 ## 功能
 
-- **狀態分組**：依 label `進行中`／`檢驗中`／`測試站待檢驗`／`正式站待檢驗`／`已上線待檢驗`／`可處理`／`討論中`／`已完成` 分組，各組亮色區分、可收合（`已完成` 預設收起）。
+- **狀態分組**：依專案 `CLAUDE.md` 列的狀態 label 分組（沒寫就用 `進行中`／`檢驗中`／`測試站待檢驗`／`正式站待檢驗`／`已上線待檢驗`／`可處理`／`討論中`／`已完成`），各組亮色區分、可收合（最後一項預設收起）。
 - **GitLab／GitHub 自動切換**：看 repo 的 `origin` remote，指到 `github.com` 就用 `gh`，其餘（含自架 GitLab）用 `glab`。兩邊共用同名狀態 label。
 - **狀態列摘要**：`GL: 進行中 2 · 討論中 5`（GitHub repo 顯示 `GH:`）。
 - **對應本機 session**：從 herdr 分頁標題／label、工作目錄（`gl-<id>-` worktree）與使用者自己輸入的 prompt 抽出 issue 編號（`#123`、`gl-123-`、issue 網址、`issue 123`），點 `↪` 用 `herdr agent focus` 切過去。
@@ -29,7 +29,19 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
   - GitHub：[`gh`](https://cli.github.com) 已登入（`gh issue list --assignee @me`），repo 上建好同名狀態 label
 - herdr、`jq`、`perl`（session 比對與切換；沒有 herdr 時只顯示 issue 清單）
 
-狀態 label 名稱寫在 `hooks/register.tsx` 的 `STATUSES`／`STATUS_COLOR`，換成自己 board 的 label 即可。
+### 自訂狀態 label
+
+在專案根目錄的 `CLAUDE.md`（或 `.claude/CLAUDE.md`）加一段 `## Issue 狀態` 清單（執行 `/gl-issues-init` 會寫入預設清單，已經有就不動），順序就是面板的排序，最後一項當完成狀態（淡色、預設收合、不算進狀態列）。顏色可在後面接色碼，沒寫就依序自動配色。每次重新整理都會重讀。
+
+```markdown
+## Issue 狀態
+
+- 進行中 #4ade80
+- 檢驗中
+- 可處理
+- 討論中
+- 已完成
+```
 
 ## 安裝
 

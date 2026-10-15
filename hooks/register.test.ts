@@ -1,11 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
-import { OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
 test('依 board 狀態 label 分組，排序照流程、無狀態排最後', async () => {
-  const issues = [raw(1, ['討論中']), raw(2, ['bug', '進行中']), raw(3, []), raw(4, ['進行中'])].map(toIssue)
+  const issues = [raw(1, ['討論中']), raw(2, ['bug', '進行中']), raw(3, []), raw(4, ['進行中'])].map(r => toIssue(r))
   expect(groupByStatus(issues).map(([s, l]) => [s, l.map(i => i.iid)])).toEqual([
     ['進行中', [2, 4]],
     ['討論中', [1]],
@@ -14,12 +14,12 @@ test('依 board 狀態 label 分組，排序照流程、無狀態排最後', asy
 })
 
 test('狀態列摘要略過已完成', async () => {
-  const issues = [raw(1, ['已完成']), raw(2, ['檢驗中'])].map(toIssue)
+  const issues = [raw(1, ['已完成']), raw(2, ['檢驗中'])].map(r => toIssue(r))
   expect(summarize(issues)).toBe('檢驗中 1')
 })
 
 test('issue 對上提到它的 herdr session，依提及次數排序', async () => {
-  const [a, b] = attachSessions([raw(118, []), raw(5, [])].map(toIssue), [
+  const [a, b] = attachSessions([raw(118, []), raw(5, [])].map(r => toIssue(r)), [
     { pane: 'w1:p1', tab: 'w1:t1', cwd: '/r', title: '順帶提到', status: 'idle', mentions: [{ iid: 118, count: 1 }] },
     { pane: 'w1:p2', tab: 'w1:t2', cwd: '/r', title: 'Issue 整理', status: 'working', mentions: [{ iid: 118, count: 33 }, { iid: 86, count: 1 }] },
   ])
@@ -94,7 +94,7 @@ test('收合切換：有就移除、沒有就加入', async () => {
 })
 
 test('已上線待檢驗是獨立狀態，排在正式站待檢驗之後', async () => {
-  const issues = [raw(1, ['可處理']), raw(2, ['已上線待檢驗']), raw(3, ['正式站待檢驗'])].map(toIssue)
+  const issues = [raw(1, ['可處理']), raw(2, ['已上線待檢驗']), raw(3, ['正式站待檢驗'])].map(r => toIssue(r))
   expect(groupByStatus(issues).map(([s]) => s)).toEqual(['正式站待檢驗', '已上線待檢驗', '可處理'])
 })
 
@@ -127,7 +127,7 @@ test('票號按鈕用系統預設瀏覽器開 issue 頁面，網址以參數傳�
 })
 
 test('同一狀態內依票號由小到大排列', async () => {
-  const issues = [raw(30, ['進行中']), raw(4, ['進行中']), raw(118, ['進行中']), raw(12, ['進行中'])].map(toIssue)
+  const issues = [raw(30, ['進行中']), raw(4, ['進行中']), raw(118, ['進行中']), raw(12, ['進行中'])].map(r => toIssue(r))
   expect(groupByStatus(issues)[0]?.[1].map(i => i.iid)).toEqual([4, 12, 30, 118])
 })
 
@@ -213,7 +213,66 @@ test('面板按「其他」「已關閉」分頁切換清單', async ($, on) => 
 })
 
 test('已關閉分頁不依狀態分組，票號新的排前面', async () => {
-  const issues = [raw(3, ['已完成']), raw(40, []), raw(12, ['進行中'])].map(toIssue)
+  const issues = [raw(3, ['已完成']), raw(40, []), raw(12, ['進行中'])].map(r => toIssue(r))
   expect(groupsFor('closed', issues).map(([s, l]) => [s, l.map(i => i.iid)])).toEqual([['已關閉', [40, 12, 3]]])
   expect(groupsFor('closed', [])).toEqual([])
+})
+
+test('從 CLAUDE.md 的「## Issue 狀態」清單讀狀態，可帶色碼，最後一項當完成狀態', async () => {
+  const md = ['# 專案', '', '## Issue 狀態', '', '- 待辦', '- 開發中 #ff0000', '* 上線', '', '## 其他段落', '- 不算'].join('\n')
+  expect(parseBoard(md)).toEqual({ statuses: ['待辦', '開發中', '上線'], colors: { 待辦: '#4ade80', 開發中: '#ff0000' }, done: '上線' })
+  expect(parseBoard('# 專案\n- 進行中')).toBeUndefined()
+  expect(parseBoard('## Issue 狀態\n\n沒有清單')).toBeUndefined()
+  expect(DEFAULT_BOARD.done).toBe('已完成')
+})
+
+test('面板依專案 CLAUDE.md 的狀態分組與摘要，沒寫就用預設', async ($, on) => {
+  const md = '## Issue 狀態\n- 待辦\n- 開發中\n- 結案\n'
+  on('fs.read', async (_$, e) => {
+    if ((e as { path: string }).path !== '/r/CLAUDE.md') throw new Error('ENOENT')
+    return { value: md } as never
+  })
+  const gh = [
+    { number: 1, title: 'a', labels: [{ name: '開發中' }], url: 'u1', updatedAt: '' },
+    { number: 2, title: 'b', labels: [{ name: '進行中' }], url: 'u2', updatedAt: '' },
+    { number: 3, title: 'c', labels: [{ name: '結案' }], url: 'u3', updatedAt: '' },
+  ]
+  const { statuses } = await runCommand($, on, 'https://github.com/o/r.git', JSON.stringify(gh))
+  expect(statuses.join('|')).toContain('GH: 開發中 1 · （無狀態） 1')
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('開發中')
+  expect(drawn).toContain('結案')
+  expect(drawn).not.toContain('"c"')
+  await ui.unmount()
+})
+
+test('預設狀態段落接在既有 CLAUDE.md 後面，寫完讀得回同一組', async () => {
+  const merged = withBoardSection('# 專案\n\n說明\n\n', DEFAULT_BOARD)
+  expect(merged.startsWith('# 專案\n\n說明\n\n## Issue 狀態\n\n- 進行中\n')).toBe(true)
+  expect(parseBoard(merged)).toEqual(DEFAULT_BOARD)
+  expect(withBoardSection(undefined, DEFAULT_BOARD).startsWith('## Issue 狀態')).toBe(true)
+})
+
+test('/gl-issues-init 寫入 CLAUDE.md；已有段落時不覆蓋', async ($, on) => {
+  const files: Record<string, string> = { '/r/CLAUDE.md': '# 專案\n' }
+  on('fs.read', async (_$, e) => {
+    const path = (e as { path: string }).path
+    if (!(path in files)) throw new Error('ENOENT')
+    return { value: files[path] } as never
+  })
+  on('fs.write', async (_$, e) => {
+    const { path, text } = e as { path: string; text: string }
+    files[path] = text
+    return { value: undefined } as never
+  })
+  const { res } = await runCommand($, on, 'https://github.com/o/r.git', '[]')
+  expect(JSON.stringify(res)).toContain('GitHub issue')
+  const first = await $.command.run({ command: 'gl-issues-init', args: '' })
+  expect(JSON.stringify(first)).toContain('加上')
+  expect(files['/r/CLAUDE.md']).toContain('# 專案\n\n## Issue 狀態\n\n- 進行中')
+  const before = files['/r/CLAUDE.md']
+  const second = await $.command.run({ command: 'gl-issues-init', args: '' })
+  expect(JSON.stringify(second)).toContain('沒有變更')
+  expect(files['/r/CLAUDE.md']).toBe(before)
 })
