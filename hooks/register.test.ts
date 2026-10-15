@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { OPEN_URL_ARGV, agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, othersOf, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -167,4 +167,38 @@ test('herdr focus 啟動不了時跳 toast，不再無聲失敗', async ($, on) 
   const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
   await ui.press({ key: '9-w1:p9' })
   expect(toasts.join('|')).toContain('herdr 切換到 w1:p9 失敗')
+})
+
+test('其他分頁：整個專案的 open issue 扣掉指派給我的；只有「我的」帶 assignee 條件', async () => {
+  expect(othersOf([raw(1, []), raw(2, []), raw(3, [])], [raw(2, [])]).map(i => i.iid)).toEqual([1, 3])
+  for (const p of Object.values(PROVIDERS)) {
+    expect(p.list(true).join(' ')).toContain('@me')
+    expect(p.list(false).join(' ')).not.toContain('@me')
+  }
+})
+
+test('面板按「其他」切到非指派給我的 issue', async ($, on) => {
+  on('process.run', async (_$, e) => {
+    const mine = e.argv.includes('@me')
+    const stdout = e.argv[0] === 'git'
+      ? 'https://github.com/o/r.git\n'
+      : e.argv[0] === 'bash'
+        ? '[]'
+        : JSON.stringify(mine
+          ? [{ number: 9, title: '我的票', labels: [{ name: '進行中' }], url: 'u9', updatedAt: '' }]
+          : [9, 21].map(n => ({ number: n, title: `票${n}`, labels: [{ name: '可處理' }], url: `u${n}`, updatedAt: '' })))
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.command.run({ command: 'gl-issues', args: '' })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  expect(JSON.stringify(await ui.drawn())).toContain('我的票')
+  expect(JSON.stringify(await ui.drawn())).not.toContain('票21')
+  await ui.press({ key: 'tab-others' })
+  expect(JSON.stringify(await ui.drawn())).toContain('票21')
+  expect(JSON.stringify(await ui.drawn())).not.toContain('我的票')
+  await ui.unmount()
 })

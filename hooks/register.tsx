@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Issue, Provider, SessionRef, Snapshot } from '../types'
+import type { Issue, Provider, SessionRef, Snapshot, Tab } from '../types'
 
 const PANE = 'gl-issues'
 const REFRESH_MS = 5 * 60 * 1000
@@ -23,6 +23,8 @@ export const STATUS_COLOR: Record<string, string> = {
 const snapshot = atom({ plugin: 'gl-issues', key: 'snapshot' } as const, null as Snapshot | null)
 // 收合中的狀態分組；已完成預設收起
 const collapsed = atom({ plugin: 'gl-issues', key: 'collapsed' } as const, ['已完成'] as string[])
+// 面板分頁：指派給我的、同專案其他人的（含未指派）
+const activeTab = atom({ plugin: 'gl-issues', key: 'tab' } as const, 'mine' as Tab)
 
 export const toggle = (list: string[], status: string): string[] =>
   list.includes(status) ? list.filter(s => s !== status) : [...list, status]
@@ -39,18 +41,21 @@ export const fromGitHub = (gh: GitHubIssue): RawIssue => ({
 })
 
 // 兩邊共用同名狀態 label，只差在用哪支 CLI 抓、JSON 長什麼樣
-export const PROVIDERS: Record<Provider, { name: string; short: string; argv: string[]; parse: (stdout: string) => RawIssue[]; view: (iid: number) => string }> = {
+// list(true) 只抓指派給我的，list(false) 抓整個專案的 open issue
+export const PROVIDERS: Record<Provider, { name: string; short: string; cli: string; list: (mine: boolean) => string[]; parse: (stdout: string) => RawIssue[]; view: (iid: number) => string }> = {
   gitlab: {
     name: 'GitLab',
     short: 'GL',
-    argv: ['glab', 'issue', 'list', '--assignee=@me', '--per-page', '100', '--output', 'json'],
+    cli: 'glab',
+    list: mine => ['glab', 'issue', 'list', ...(mine ? ['--assignee=@me'] : []), '--per-page', '100', '--output', 'json'],
     parse: stdout => JSON.parse(stdout) as RawIssue[],
     view: iid => `glab issue view ${iid} --comments`,
   },
   github: {
     name: 'GitHub',
     short: 'GH',
-    argv: ['gh', 'issue', 'list', '--assignee', '@me', '--state', 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
+    cli: 'gh',
+    list: mine => ['gh', 'issue', 'list', ...(mine ? ['--assignee', '@me'] : []), '--state', 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
     parse: stdout => (JSON.parse(stdout) as GitHubIssue[]).map(fromGitHub),
     // gh issue view --comments 會查已停用的 Projects (classic) 而失敗，改用 --json
     view: iid => `gh issue view ${iid} --json title,body,labels,comments`,
@@ -112,6 +117,14 @@ export const attachSessions = (issues: Issue[], agents: AgentMentions[]): Issue[
       })
       .sort((x, y) => y.count - x.count),
   }))
+
+// 「其他」分頁：整個專案的 open issue 扣掉指派給我的
+export const othersOf = (all: RawIssue[], mine: RawIssue[]): RawIssue[] => {
+  const mineIids = new Set(mine.map(i => i.iid))
+  return all.filter(i => !mineIids.has(i.iid))
+}
+
+const TABS: [Tab, string][] = [['mine', '我的'], ['others', '其他']]
 
 const STATUS_MARK: Record<string, string> = { working: '◑', blocked: '!', done: '✓', idle: '·' }
 
@@ -204,9 +217,19 @@ async function refresh($: EngineInterface) {
   const fetchedAt = new Date(await $.clock.now()).toLocaleTimeString('zh-TW', { hour12: false })
   const provider = await currentProvider($)
   const p = PROVIDERS[provider]
-  try {
-    const res = await $.process.run(p.argv, { timeoutMs: 30000 })
+  const list = async (mine: boolean): Promise<RawIssue[]> => {
+    const res = await $.process.run(p.list(mine), { timeoutMs: 30000 })
     if (res.exitCode !== 0) throw new Error(res.stderr.trim().split('\n')[0] || `exit ${res.exitCode}`)
+    return p.parse(res.stdout)
+  }
+  // 全專案清單失敗不影響「我的」分頁
+  const allRequest = list(false).then(
+    all => ({ all, othersError: undefined as string | undefined }),
+    (err: unknown) => ({ all: undefined as RawIssue[] | undefined, othersError: String(err) }),
+  )
+  try {
+    const mine = await list(true)
+    const { all, othersError } = await allRequest
     let agents: AgentMentions[] = []
     let herdrError: string | undefined
     try {
@@ -217,14 +240,19 @@ async function refresh($: EngineInterface) {
       herdrError = String(err)
     }
     const cwd = await $.session.cwd()
-    const issues = attachSessions(
-      p.parse(res.stdout).map(toIssue),
-      agents.filter(a => sameProject(a.cwd, cwd)),
-    )
-    await update($, snapshot, () => ({ provider, issues, fetchedAt, herdrError }))
+    const local = agents.filter(a => sameProject(a.cwd, cwd))
+    const issues = attachSessions(mine.map(toIssue), local)
+    await update($, snapshot, prev => ({
+      provider,
+      issues,
+      others: all ? attachSessions(othersOf(all, mine).map(toIssue), local) : prev?.others ?? [],
+      fetchedAt,
+      herdrError,
+      othersError,
+    }))
     $.ui.status(`${p.short}: ${summarize(issues) || '無待辦'}`)
   } catch (err) {
-    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], fetchedAt, error: String(err) }))
+    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], others: prev?.others ?? [], fetchedAt, error: String(err) }))
     $.ui.status(`${p.short}: 讀取失敗`)
   }
 }
@@ -249,7 +277,9 @@ export const register: Register = on => {
     const { Box, Text, Link, Button } = $.ui.resolve(e)
     const snap = await read($, snapshot)
     const closed = await read($, collapsed)
-    const groups = snap ? groupByStatus(snap.issues) : []
+    const current = await read($, activeTab)
+    const shown = snap ? (current === 'mine' ? snap.issues : snap.others) : []
+    const groups = groupByStatus(shown)
     const allClosed = groups.length > 0 && groups.every(([s]) => closed.includes(s))
 
     return (
@@ -266,9 +296,24 @@ export const register: Register = on => {
             </Button>
           )}
         </Box>
-        {snap?.error && <Text color="red">{PROVIDERS[snap.provider].argv[0]} 失敗：{snap.error}</Text>}
+        <Box flexDirection="row" gap={1}>
+          {TABS.map(([id, label]) => (
+            <Button
+              key={`tab-${id}`}
+              {...(current === id ? { variant: 'primary' as const } : {})}
+              dimColor={current !== id}
+              onPress={() => void update($, activeTab, () => id)}
+            >
+              {`${label}（${snap ? (id === 'mine' ? snap.issues : snap.others).length : '…'}）`}
+            </Button>
+          ))}
+        </Box>
+        {snap?.error && <Text color="red">{PROVIDERS[snap.provider].cli} 失敗：{snap.error}</Text>}
+        {current === 'others' && snap?.othersError && <Text color="red">{PROVIDERS[snap.provider].cli} 失敗：{snap.othersError}</Text>}
         {snap?.herdrError && <Text dimColor>herdr 比對略過：{snap.herdrError}</Text>}
-        {snap && snap.issues.length === 0 && !snap.error && <Text dimColor>沒有指派給你的 open issue。</Text>}
+        {snap && shown.length === 0 && !snap.error && (
+          <Text dimColor>{current === 'mine' ? '沒有指派給你的 open issue。' : '沒有其他人的 open issue。'}</Text>
+        )}
         {groups.map(([status, list]) => (
             <Box flexDirection="column">
               <Box flexDirection="row" gap={1}>
