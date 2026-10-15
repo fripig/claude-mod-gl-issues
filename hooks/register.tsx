@@ -41,13 +41,13 @@ export const fromGitHub = (gh: GitHubIssue): RawIssue => ({
 })
 
 // 兩邊共用同名狀態 label，只差在用哪支 CLI 抓、JSON 長什麼樣
-// list(true) 只抓指派給我的，list(false) 抓整個專案的 open issue
-export const PROVIDERS: Record<Provider, { name: string; short: string; cli: string; list: (mine: boolean) => string[]; parse: (stdout: string) => RawIssue[]; view: (iid: number) => string }> = {
+// list('mine') 指派給我的 open issue、'others' 整個專案的 open issue（再扣掉我的）、'closed' 指派給我已關閉的
+export const PROVIDERS: Record<Provider, { name: string; short: string; cli: string; list: (tab: Tab) => string[]; parse: (stdout: string) => RawIssue[]; view: (iid: number) => string }> = {
   gitlab: {
     name: 'GitLab',
     short: 'GL',
     cli: 'glab',
-    list: mine => ['glab', 'issue', 'list', ...(mine ? ['--assignee=@me'] : []), '--per-page', '100', '--output', 'json'],
+    list: tab => ['glab', 'issue', 'list', ...(tab === 'others' ? [] : ['--assignee=@me']), ...(tab === 'closed' ? ['--closed'] : []), '--per-page', '100', '--output', 'json'],
     parse: stdout => JSON.parse(stdout) as RawIssue[],
     view: iid => `glab issue view ${iid} --comments`,
   },
@@ -55,7 +55,7 @@ export const PROVIDERS: Record<Provider, { name: string; short: string; cli: str
     name: 'GitHub',
     short: 'GH',
     cli: 'gh',
-    list: mine => ['gh', 'issue', 'list', ...(mine ? ['--assignee', '@me'] : []), '--state', 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
+    list: tab => ['gh', 'issue', 'list', ...(tab === 'others' ? [] : ['--assignee', '@me']), '--state', tab === 'closed' ? 'closed' : 'open', '--limit', '100', '--json', 'number,title,labels,url,updatedAt'],
     parse: stdout => (JSON.parse(stdout) as GitHubIssue[]).map(fromGitHub),
     // gh issue view --comments 會查已停用的 Projects (classic) 而失敗，改用 --json
     view: iid => `gh issue view ${iid} --json title,body,labels,comments`,
@@ -124,7 +124,19 @@ export const othersOf = (all: RawIssue[], mine: RawIssue[]): RawIssue[] => {
   return all.filter(i => !mineIids.has(i.iid))
 }
 
-const TABS: [Tab, string][] = [['mine', '我的'], ['others', '其他']]
+const TABS: [Tab, string][] = [['mine', '我的'], ['others', '其他'], ['closed', '已關閉']]
+const EMPTY_TEXT: Record<Tab, string> = {
+  mine: '沒有指派給你的 open issue。',
+  others: '沒有其他人的 open issue。',
+  closed: '沒有指派給你的已關閉 issue。',
+}
+const CLOSED_GROUP = '已關閉'
+
+// 已關閉的 issue 狀態 label 多半停在已完成，不分組，新的排前面
+export const groupsFor = (tab: Tab, issues: Issue[]): [string, Issue[]][] =>
+  tab !== 'closed'
+    ? groupByStatus(issues)
+    : issues.length > 0 ? [[CLOSED_GROUP, [...issues].sort((x, y) => y.iid - x.iid)]] : []
 
 const STATUS_MARK: Record<string, string> = { working: '◑', blocked: '!', done: '✓', idle: '·' }
 
@@ -217,19 +229,22 @@ async function refresh($: EngineInterface) {
   const fetchedAt = new Date(await $.clock.now()).toLocaleTimeString('zh-TW', { hour12: false })
   const provider = await currentProvider($)
   const p = PROVIDERS[provider]
-  const list = async (mine: boolean): Promise<RawIssue[]> => {
-    const res = await $.process.run(p.list(mine), { timeoutMs: 30000 })
+  const list = async (tab: Tab): Promise<RawIssue[]> => {
+    const res = await $.process.run(p.list(tab), { timeoutMs: 30000 })
     if (res.exitCode !== 0) throw new Error(res.stderr.trim().split('\n')[0] || `exit ${res.exitCode}`)
     return p.parse(res.stdout)
   }
-  // 全專案清單失敗不影響「我的」分頁
-  const allRequest = list(false).then(
-    all => ({ all, othersError: undefined as string | undefined }),
-    (err: unknown) => ({ all: undefined as RawIssue[] | undefined, othersError: String(err) }),
+  // 其他、已關閉分頁的清單失敗不影響「我的」分頁
+  const settle = (tab: Tab) => list(tab).then(
+    raws => ({ raws, error: undefined as string | undefined }),
+    (err: unknown) => ({ raws: undefined as RawIssue[] | undefined, error: String(err) }),
   )
+  const allRequest = settle('others')
+  const closedRequest = settle('closed')
   try {
-    const mine = await list(true)
-    const { all, othersError } = await allRequest
+    const mine = await list('mine')
+    const all = await allRequest
+    const closed = await closedRequest
     let agents: AgentMentions[] = []
     let herdrError: string | undefined
     try {
@@ -245,14 +260,16 @@ async function refresh($: EngineInterface) {
     await update($, snapshot, prev => ({
       provider,
       issues,
-      others: all ? attachSessions(othersOf(all, mine).map(toIssue), local) : prev?.others ?? [],
+      others: all.raws ? attachSessions(othersOf(all.raws, mine).map(toIssue), local) : prev?.others ?? [],
+      closed: closed.raws ? attachSessions(closed.raws.map(toIssue), local) : prev?.closed ?? [],
       fetchedAt,
       herdrError,
-      othersError,
+      othersError: all.error,
+      closedError: closed.error,
     }))
     $.ui.status(`${p.short}: ${summarize(issues) || '無待辦'}`)
   } catch (err) {
-    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], others: prev?.others ?? [], fetchedAt, error: String(err) }))
+    await update($, snapshot, prev => ({ provider, issues: prev?.issues ?? [], others: prev?.others ?? [], closed: prev?.closed ?? [], fetchedAt, error: String(err) }))
     $.ui.status(`${p.short}: 讀取失敗`)
   }
 }
@@ -278,8 +295,9 @@ export const register: Register = on => {
     const snap = await read($, snapshot)
     const closed = await read($, collapsed)
     const current = await read($, activeTab)
-    const shown = snap ? (current === 'mine' ? snap.issues : snap.others) : []
-    const groups = groupByStatus(shown)
+    const listOf = (s: Snapshot, t: Tab): Issue[] => (t === 'mine' ? s.issues : t === 'others' ? s.others : s.closed)
+    const shown = snap ? listOf(snap, current) : []
+    const groups = groupsFor(current, shown)
     const allClosed = groups.length > 0 && groups.every(([s]) => closed.includes(s))
 
     return (
@@ -304,15 +322,17 @@ export const register: Register = on => {
               dimColor={current !== id}
               onPress={() => void update($, activeTab, () => id)}
             >
-              {`${label}（${snap ? (id === 'mine' ? snap.issues : snap.others).length : '…'}）`}
+              {`${label}（${snap ? listOf(snap, id).length : '…'}）`}
             </Button>
           ))}
         </Box>
         {snap?.error && <Text color="red">{PROVIDERS[snap.provider].cli} 失敗：{snap.error}</Text>}
-        {current === 'others' && snap?.othersError && <Text color="red">{PROVIDERS[snap.provider].cli} 失敗：{snap.othersError}</Text>}
+        {snap && (current === 'others' ? snap.othersError : current === 'closed' ? snap.closedError : undefined) && (
+          <Text color="red">{PROVIDERS[snap.provider].cli} 失敗：{current === 'others' ? snap.othersError : snap.closedError}</Text>
+        )}
         {snap?.herdrError && <Text dimColor>herdr 比對略過：{snap.herdrError}</Text>}
         {snap && shown.length === 0 && !snap.error && (
-          <Text dimColor>{current === 'mine' ? '沒有指派給你的 open issue。' : '沒有其他人的 open issue。'}</Text>
+          <Text dimColor>{EMPTY_TEXT[current]}</Text>
         )}
         {groups.map(([status, list]) => (
             <Box flexDirection="column">

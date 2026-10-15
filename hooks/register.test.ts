@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, initialPrompt, othersOf, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, sameProject, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -172,21 +172,27 @@ test('herdr focus 啟動不了時跳 toast，不再無聲失敗', async ($, on) 
 test('其他分頁：整個專案的 open issue 扣掉指派給我的；只有「我的」帶 assignee 條件', async () => {
   expect(othersOf([raw(1, []), raw(2, []), raw(3, [])], [raw(2, [])]).map(i => i.iid)).toEqual([1, 3])
   for (const p of Object.values(PROVIDERS)) {
-    expect(p.list(true).join(' ')).toContain('@me')
-    expect(p.list(false).join(' ')).not.toContain('@me')
+    expect(p.list('mine').join(' ')).toContain('@me')
+    expect(p.list('others').join(' ')).not.toContain('@me')
+    expect(p.list('closed').join(' ')).toContain('@me')
   }
+  expect(PROVIDERS.gitlab.list('closed')).toContain('--closed')
+  expect(PROVIDERS.github.list('closed').join(' ')).toContain('--state closed')
+  expect(PROVIDERS.github.list('mine').join(' ')).toContain('--state open')
 })
 
-test('面板按「其他」切到非指派給我的 issue', async ($, on) => {
+test('面板按「其他」「已關閉」分頁切換清單', async ($, on) => {
   on('process.run', async (_$, e) => {
     const mine = e.argv.includes('@me')
     const stdout = e.argv[0] === 'git'
       ? 'https://github.com/o/r.git\n'
       : e.argv[0] === 'bash'
         ? '[]'
-        : JSON.stringify(mine
-          ? [{ number: 9, title: '我的票', labels: [{ name: '進行中' }], url: 'u9', updatedAt: '' }]
-          : [9, 21].map(n => ({ number: n, title: `票${n}`, labels: [{ name: '可處理' }], url: `u${n}`, updatedAt: '' })))
+        : JSON.stringify(e.argv.includes('closed')
+          ? [{ number: 3, title: '關掉的票', labels: [{ name: '已完成' }], url: 'u3', updatedAt: '' }]
+          : mine
+            ? [{ number: 9, title: '我的票', labels: [{ name: '進行中' }], url: 'u9', updatedAt: '' }]
+            : [9, 21].map(n => ({ number: n, title: `票${n}`, labels: [{ name: '可處理' }], url: `u${n}`, updatedAt: '' })))
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
   on('session.cwd', async () => ({ value: '/r' }) as never)
@@ -200,5 +206,14 @@ test('面板按「其他」切到非指派給我的 issue', async ($, on) => {
   await ui.press({ key: 'tab-others' })
   expect(JSON.stringify(await ui.drawn())).toContain('票21')
   expect(JSON.stringify(await ui.drawn())).not.toContain('我的票')
+  await ui.press({ key: 'tab-closed' })
+  expect(JSON.stringify(await ui.drawn())).toContain('關掉的票')
+  expect(JSON.stringify(await ui.drawn())).not.toContain('票21')
   await ui.unmount()
+})
+
+test('已關閉分頁不依狀態分組，票號新的排前面', async () => {
+  const issues = [raw(3, ['已完成']), raw(40, []), raw(12, ['進行中'])].map(toIssue)
+  expect(groupsFor('closed', issues).map(([s, l]) => [s, l.map(i => i.iid)])).toEqual([['已關閉', [40, 12, 3]]])
+  expect(groupsFor('closed', [])).toEqual([])
 })
