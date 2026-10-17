@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -275,4 +275,21 @@ test('/gl-issues-init 寫入 CLAUDE.md；已有段落時不覆蓋', async ($, on
   const second = await $.command.run({ command: 'gl-issues-init', args: '' })
   expect(JSON.stringify(second)).toContain('沒有變更')
   expect(files['/r/CLAUDE.md']).toBe(before)
+})
+
+test('同一張 issue 已有 session 時，新 agent 名稱接 -2、-3 避開占用', async () => {
+  const issue = toIssue(raw(7, []))
+  expect(freeAgentName(issue, [])).toBe('gl-7')
+  expect(freeAgentName(issue, ['gl-7', 'gl-70'])).toBe('gl-7-2')
+  expect(freeAgentName(issue, ['gl-7', 'gl-7-2'])).toBe('gl-7-3')
+  expect(/^[a-z][a-z0-9_-]{0,31}$/.test(freeAgentName({ ...issue, iid: 99999 }, ['gl-99999']))).toBe(true)
+})
+
+test('已有 session 的 issue 也有 ▶ 可以再開一個', async ($, on) => {
+  await runCommand($, on, 'https://github.com/o/r.git',
+    JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }]))
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  expect(await ui.find({ key: '9-w1:p9' })).toBeDefined()
+  expect(await ui.find({ key: 'start-9' })).toBeDefined()
+  await ui.unmount()
 })

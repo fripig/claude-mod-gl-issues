@@ -241,6 +241,22 @@ export const sessionName = (issue: Issue): string => {
 
 export const agentName = (issue: Issue): string => `gl-${issue.iid}`
 
+// herdr 的 agent 名稱在活著的 agent 間必須唯一；同一張 issue 開第二個 session 時接 -2、-3…
+export const freeAgentName = (issue: Issue, taken: readonly string[]): string => {
+  const base = agentName(issue)
+  if (!taken.includes(base)) return base
+  let n = 2
+  while (taken.includes(`${base}-${n}`)) n++
+  return `${base}-${n}`
+}
+
+async function liveAgentNames($: EngineInterface): Promise<string[]> {
+  const res = await $.process.run(['herdr', 'agent', 'list'])
+  if (res.exitCode !== 0) return []
+  const agents = (JSON.parse(res.stdout) as { result: { agents: { name?: string }[] } }).result.agents
+  return agents.flatMap(a => (a.name ? [a.name] : []))
+}
+
 // 新 session 的第一句話：讓 Claude 自己用 CLI 讀 issue（含留言），摘要完先停下等指示
 export const initialPrompt = (provider: Provider, issue: Issue): string => {
   const view = PROVIDERS[provider].view(issue.iid)
@@ -261,7 +277,7 @@ async function startSession($: EngineInterface, provider: Provider, issue: Issue
     const pane = (JSON.parse(tab.stdout) as { result: { root_pane: { pane_id: string } } }).result.root_pane.pane_id
     // herdr 的 agent 名稱只收小寫英數、-、_；顯示用的名稱交給 claude -n 與分頁 label
     const started = await $.process.run(
-      ['herdr', 'agent', 'start', agentName(issue), '--kind', 'claude', '--pane', pane, '--', '-n', name],
+      ['herdr', 'agent', 'start', freeAgentName(issue, await liveAgentNames($)), '--kind', 'claude', '--pane', pane, '--', '-n', name],
       { timeoutMs: 60000 },
     )
     if (started.exitCode !== 0) throw new Error(started.stderr.trim() || started.stdout.trim() || `exit ${started.exitCode}`)
@@ -408,11 +424,9 @@ export const register: Register = on => {
                     <Button key={`open-${i.iid}`} onPress={() => void openIssue($, i)}>
                       {`#${i.iid}`}
                     </Button>
-                    {i.sessions.length === 0 && (
-                      <Button key={`start-${i.iid}`} onPress={() => void startSession($, snap.provider, i)}>
-                        ▶
-                      </Button>
-                    )}
+                    <Button key={`start-${i.iid}`} onPress={() => void startSession($, snap.provider, i)}>
+                      ▶
+                    </Button>
                     <Text wrap="truncate-end">
                       <Link href={i.url}>{i.title}</Link>
                     </Text>
