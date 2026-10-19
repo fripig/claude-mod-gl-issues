@@ -38,16 +38,33 @@ export const parseBoard = (markdown: string): Board | undefined => {
   return entries.length > 0 ? makeBoard(entries) : undefined
 }
 
-async function loadBoard($: EngineInterface, cwd: string): Promise<Board> {
+// 從 CLAUDE.md 的「## Issue 追蹤」標題下讀 label 清單：帶這些 label 的 open issue 即使沒指派給我也併進「我的」分頁
+export const parseTracked = (markdown: string): string[] | undefined => {
+  const lines = markdown.split('\n')
+  const start = lines.findIndex(l => /^#{1,6}\s*issue\s*追蹤\s*$/i.test(l.trim()))
+  if (start < 0) return undefined
+  const labels: string[] = []
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,6}\s/.test(line.trim())) break
+    const m = /^\s*[-*+]\s+(.+?)\s*$/.exec(line)
+    if (m?.[1]) labels.push(m[1])
+  }
+  return labels
+}
+
+async function loadConfig($: EngineInterface, cwd: string): Promise<{ board: Board; tracked: string[] }> {
+  let board: Board | undefined
+  let tracked: string[] | undefined
   for (const path of [`${cwd}/CLAUDE.md`, `${cwd}/.claude/CLAUDE.md`]) {
     try {
-      const board = parseBoard(await $.fs.read(path))
-      if (board) return board
+      const text = await $.fs.read(path)
+      board ??= parseBoard(text)
+      tracked ??= parseTracked(text)
     } catch {
       // 沒有這個檔就看下一個
     }
   }
-  return DEFAULT_BOARD
+  return { board: board ?? DEFAULT_BOARD, tracked: tracked ?? [] }
 }
 
 export const boardSection = (board: Board): string =>
@@ -169,7 +186,13 @@ export const attachSessions = (issues: Issue[], agents: AgentMentions[]): Issue[
       .sort((x, y) => y.count - x.count),
   }))
 
-// 「其他」分頁：整個專案的 open issue 扣掉指派給我的
+// 追蹤中：沒指派給我、但帶追蹤 label 的 open issue
+export const trackedOf = (all: RawIssue[], mine: RawIssue[], tracked: string[]): RawIssue[] => {
+  const mineIids = new Set(mine.map(i => i.iid))
+  return all.filter(i => !mineIids.has(i.iid) && i.labels.some(l => tracked.includes(l)))
+}
+
+// 「其他」分頁：整個專案的 open issue 扣掉「我的」分頁已列的
 export const othersOf = (all: RawIssue[], mine: RawIssue[]): RawIssue[] => {
   const mineIids = new Set(mine.map(i => i.iid))
   return all.filter(i => !mineIids.has(i.iid))
@@ -177,7 +200,7 @@ export const othersOf = (all: RawIssue[], mine: RawIssue[]): RawIssue[] => {
 
 const TABS: [Tab, string][] = [['mine', '我的'], ['others', '其他'], ['closed', '已關閉']]
 const EMPTY_TEXT: Record<Tab, string> = {
-  mine: '沒有指派給你的 open issue。',
+  mine: '沒有指派給你或追蹤中的 open issue。',
   others: '沒有其他人的 open issue。',
   closed: '沒有指派給你的已關閉 issue。',
 }
@@ -323,14 +346,16 @@ async function refresh($: EngineInterface) {
     }
     const cwd = await $.session.cwd()
     const local = agents.filter(a => sameProject(a.cwd, cwd))
-    const board = await loadBoard($, cwd)
+    const { board, tracked } = await loadConfig($, cwd)
     const build = (raws: RawIssue[]) => attachSessions(raws.map(r => toIssue(r, board)), local)
-    const issues = build(mine)
+    // 追蹤中的 issue 從整個專案的清單篩出；那份清單失敗時「我的」只剩指派給我的
+    const extra = all.raws ? trackedOf(all.raws, mine, tracked) : []
+    const issues = [...build(mine), ...build(extra).map(i => ({ ...i, tracked: true }))]
     await update($, snapshot, prev => ({
       provider,
       board,
       issues,
-      others: all.raws ? build(othersOf(all.raws, mine)) : prev?.others ?? [],
+      others: all.raws ? build(othersOf(all.raws, [...mine, ...extra])) : prev?.others ?? [],
       closed: closed.raws ? build(closed.raws) : prev?.closed ?? [],
       fetchedAt,
       herdrError,
@@ -427,6 +452,7 @@ export const register: Register = on => {
                     <Button key={`start-${i.iid}`} onPress={() => void startSession($, snap.provider, i)}>
                       ▶
                     </Button>
+                    {i.tracked && <Text dimColor>追蹤</Text>}
                     <Text wrap="truncate-end">
                       <Link href={i.url}>{i.title}</Link>
                     </Text>

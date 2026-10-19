@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, parseTracked, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -291,5 +291,54 @@ test('已有 session 的 issue 也有 ▶ 可以再開一個', async ($, on) => 
   const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
   expect(await ui.find({ key: '9-w1:p9' })).toBeDefined()
   expect(await ui.find({ key: 'start-9' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('從 CLAUDE.md 的「## Issue 追蹤」讀 label 清單，不影響狀態清單', async () => {
+  const md = '## Issue 狀態\n- 討論中\n- 已完成\n\n## Issue 追蹤\n\n- fripig\n- watch #abc\n\n## 其他\n- x\n'
+  expect(parseTracked(md)).toEqual(['fripig', 'watch #abc'])
+  expect(parseBoard(md)?.statuses).toEqual(['討論中', '已完成'])
+  expect(parseTracked('## Issue 狀態\n- a\n')).toBeUndefined()
+})
+
+test('追蹤中：沒指派給我、但帶追蹤 label 的 issue', async () => {
+  const all = [raw(1, ['fripig', '討論中']), raw(2, ['fripig']), raw(3, ['討論中'])]
+  expect(trackedOf(all, [raw(2, [])], ['fripig']).map(i => i.iid)).toEqual([1])
+  expect(trackedOf(all, [], [])).toEqual([])
+})
+
+test('「我的」分頁併入帶追蹤 label 的卡並標示，「其他」分頁不再重複列出', async ($, on) => {
+  on('fs.read', async (_$, e) => {
+    if ((e as { path: string }).path !== '/r/CLAUDE.md') throw new Error('ENOENT')
+    return { value: '## Issue 追蹤\n- fripig\n' } as never
+  })
+  on('process.run', async (_$, e) => {
+    const mine = e.argv.includes('--assignee=@me')
+    const stdout = e.argv[0] === 'git'
+      ? 'git@gitlab.example.com:team/app.git\n'
+      : e.argv[0] === 'bash'
+        ? '[]'
+        : JSON.stringify(e.argv.includes('--closed')
+          ? []
+          : mine
+            ? [raw(9, ['進行中'])]
+            : [raw(9, ['進行中']), { ...raw(210, ['fripig', '討論中']), title: '追蹤的票' }, { ...raw(21, ['可處理']), title: '別人的票' }])
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.command.run({ command: 'gl-issues', args: '' })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitLab issues' } as never })
+  const mineDrawn = JSON.stringify(await ui.drawn())
+  expect(mineDrawn).toContain('追蹤的票')
+  expect(mineDrawn).toContain('追蹤')
+  expect(mineDrawn).toContain('我的（2）')
+  expect(mineDrawn).not.toContain('別人的票')
+  await ui.press({ key: 'tab-others' })
+  const othersDrawn = JSON.stringify(await ui.drawn())
+  expect(othersDrawn).toContain('別人的票')
+  expect(othersDrawn).not.toContain('追蹤的票')
   await ui.unmount()
 })

@@ -14,6 +14,7 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
 
 ## 功能
 
+- **追蹤 label**：帶 `CLAUDE.md` 所列追蹤 label 的 issue 即使指派給別人也併進「我的」分頁。
 - **狀態分組**：依專案 `CLAUDE.md` 列的狀態 label 分組（沒寫就用 `進行中`／`檢驗中`／`測試站待檢驗`／`正式站待檢驗`／`已上線待檢驗`／`可處理`／`討論中`／`已完成`），各組亮色區分、可收合（最後一項預設收起）。
 - **GitLab／GitHub 自動切換**：看 repo 的 `origin` remote，指到 `github.com` 就用 `gh`，其餘（含自架 GitLab）用 `glab`。兩邊共用同名狀態 label。
 - **狀態列摘要**：`GL: 進行中 2 · 討論中 5`（GitHub repo 顯示 `GH:`）。
@@ -41,6 +42,16 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
 - 可處理
 - 討論中
 - 已完成
+```
+
+### 追蹤 label
+
+指派給別人、但自己還要盯的卡，可在同一份 `CLAUDE.md` 加一段 `## Issue 追蹤` 清單，列出用來標記追蹤的 label。帶這些 label 的 open issue 會併進「我的」分頁（照狀態分組，標題前標「追蹤」），不再出現在「其他」分頁。追蹤卡從整個專案的 issue 清單篩出，那份清單讀取失敗時「我的」只列指派給自己的。
+
+```markdown
+## Issue 追蹤
+
+- fripig
 ```
 
 ## 安裝
