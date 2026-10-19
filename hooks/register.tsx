@@ -38,33 +38,23 @@ export const parseBoard = (markdown: string): Board | undefined => {
   return entries.length > 0 ? makeBoard(entries) : undefined
 }
 
-// 從 CLAUDE.md 的「## Issue 追蹤」標題下讀 label 清單：帶這些 label 的 open issue 即使沒指派給我也併進「我的」分頁
-export const parseTracked = (markdown: string): string[] | undefined => {
-  const lines = markdown.split('\n')
-  const start = lines.findIndex(l => /^#{1,6}\s*issue\s*追蹤\s*$/i.test(l.trim()))
-  if (start < 0) return undefined
-  const labels: string[] = []
-  for (const line of lines.slice(start + 1)) {
-    if (/^#{1,6}\s/.test(line.trim())) break
-    const m = /^\s*[-*+]\s+(.+?)\s*$/.exec(line)
-    if (m?.[1]) labels.push(m[1])
-  }
-  return labels
-}
-
-async function loadConfig($: EngineInterface, cwd: string): Promise<{ board: Board; tracked: string[] }> {
-  let board: Board | undefined
-  let tracked: string[] | undefined
+async function loadBoard($: EngineInterface, cwd: string): Promise<Board> {
   for (const path of [`${cwd}/CLAUDE.md`, `${cwd}/.claude/CLAUDE.md`]) {
     try {
-      const text = await $.fs.read(path)
-      board ??= parseBoard(text)
-      tracked ??= parseTracked(text)
+      const board = parseBoard(await $.fs.read(path))
+      if (board) return board
     } catch {
       // 沒有這個檔就看下一個
     }
   }
-  return { board: board ?? DEFAULT_BOARD, tracked: tracked ?? [] }
+  return DEFAULT_BOARD
+}
+
+// 追蹤 label 是個人設定（userConfig.trackedLabels，存在使用者自己的 settings），不放共用的 CLAUDE.md
+export const trackedLabels = (options: Readonly<Record<string, unknown>> | undefined): string[] => {
+  const v = options?.trackedLabels
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : []
+  return list.filter((l): l is string => typeof l === 'string').map(l => l.trim()).filter(l => l.length > 0)
 }
 
 export const boardSection = (board: Board): string =>
@@ -315,6 +305,9 @@ async function startSession($: EngineInterface, provider: Provider, issue: Issue
   }
 }
 
+// register 時由 options 設定；每次重載模組都重新讀
+let tracked: string[] = []
+
 async function refresh($: EngineInterface) {
   const fetchedAt = new Date(await $.clock.now()).toLocaleTimeString('zh-TW', { hour12: false })
   const provider = await currentProvider($)
@@ -346,7 +339,7 @@ async function refresh($: EngineInterface) {
     }
     const cwd = await $.session.cwd()
     const local = agents.filter(a => sameProject(a.cwd, cwd))
-    const { board, tracked } = await loadConfig($, cwd)
+    const board = await loadBoard($, cwd)
     const build = (raws: RawIssue[]) => attachSessions(raws.map(r => toIssue(r, board)), local)
     // 追蹤中的 issue 從整個專案的清單篩出；那份清單失敗時「我的」只剩指派給我的
     const extra = all.raws ? trackedOf(all.raws, mine, tracked) : []
@@ -369,7 +362,8 @@ async function refresh($: EngineInterface) {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  tracked = trackedLabels(options)
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
     await $.command.register({ name: 'gl-issues-init', description: '在專案 CLAUDE.md 寫入預設的 issue 狀態 label 清單' })

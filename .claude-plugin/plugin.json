@@ -1,11 +1,21 @@
 {
   "name": "gl-issues",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Pane listing GitLab/GitHub issues assigned to me, grouped by board status label",
   "types": "./types/index.d.ts",
   "author": {
     "name": "fripig"
   },
   "repository": "https://github.com/fripig/claude-mod-gl-issues",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "trackedLabels": {
+      "type": "string",
+      "multiple": true,
+      "title": "追蹤 label",
+      "description": "帶這些 label 的 open issue 即使指派給別人也併進「我的」分頁",
+      "required": false,
+      "default": []
+    }
+  }
 }

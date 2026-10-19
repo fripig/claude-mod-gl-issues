@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, parseTracked, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -294,11 +294,11 @@ test('已有 session 的 issue 也有 ▶ 可以再開一個', async ($, on) => 
   await ui.unmount()
 })
 
-test('從 CLAUDE.md 的「## Issue 追蹤」讀 label 清單，不影響狀態清單', async () => {
-  const md = '## Issue 狀態\n- 討論中\n- 已完成\n\n## Issue 追蹤\n\n- fripig\n- watch #abc\n\n## 其他\n- x\n'
-  expect(parseTracked(md)).toEqual(['fripig', 'watch #abc'])
-  expect(parseBoard(md)?.statuses).toEqual(['討論中', '已完成'])
-  expect(parseTracked('## Issue 狀態\n- a\n')).toBeUndefined()
+test('追蹤 label 讀 userConfig.trackedLabels，陣列或逗號字串皆可，空值為空清單', async () => {
+  expect(trackedLabels({ trackedLabels: ['fripig', ' watch '] })).toEqual(['fripig', 'watch'])
+  expect(trackedLabels({ trackedLabels: 'fripig, watch,' })).toEqual(['fripig', 'watch'])
+  expect(trackedLabels({})).toEqual([])
+  expect(trackedLabels(undefined)).toEqual([])
 })
 
 test('追蹤中：沒指派給我、但帶追蹤 label 的 issue', async () => {
@@ -307,11 +307,7 @@ test('追蹤中：沒指派給我、但帶追蹤 label 的 issue', async () => {
   expect(trackedOf(all, [], [])).toEqual([])
 })
 
-test('「我的」分頁併入帶追蹤 label 的卡並標示，「其他」分頁不再重複列出', async ($, on) => {
-  on('fs.read', async (_$, e) => {
-    if ((e as { path: string }).path !== '/r/CLAUDE.md') throw new Error('ENOENT')
-    return { value: '## Issue 追蹤\n- fripig\n' } as never
-  })
+test('「我的」分頁併入帶追蹤 label 的卡並標示，「其他」分頁不再重複列出', { options: { trackedLabels: ['fripig'] } }, async ($, on) => {
   on('process.run', async (_$, e) => {
     const mine = e.argv.includes('--assignee=@me')
     const stdout = e.argv[0] === 'git'
@@ -340,5 +336,26 @@ test('「我的」分頁併入帶追蹤 label 的卡並標示，「其他」分�
   const othersDrawn = JSON.stringify(await ui.drawn())
   expect(othersDrawn).toContain('別人的票')
   expect(othersDrawn).not.toContain('追蹤的票')
+  await ui.unmount()
+})
+
+test('沒設定追蹤 label 時，帶 fripig 的卡留在「其他」分頁', async ($, on) => {
+  on('process.run', async (_$, e) => {
+    const stdout = e.argv[0] === 'git'
+      ? 'git@gitlab.example.com:team/app.git\n'
+      : e.argv[0] === 'bash'
+        ? '[]'
+        : JSON.stringify(e.argv.includes('--closed') ? [] : e.argv.includes('--assignee=@me') ? [] : [{ ...raw(210, ['fripig']), title: '追蹤的票' }])
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  await $.command.run({ command: 'gl-issues', args: '' })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitLab issues' } as never })
+  expect(JSON.stringify(await ui.drawn())).not.toContain('追蹤的票')
+  await ui.press({ key: 'tab-others' })
+  expect(JSON.stringify(await ui.drawn())).toContain('追蹤的票')
   await ui.unmount()
 })
