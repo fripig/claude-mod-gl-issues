@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -357,5 +357,67 @@ test('沒設定追蹤 label 時，帶 fripig 的卡留在「其他」分頁', as
   expect(JSON.stringify(await ui.drawn())).not.toContain('追蹤的票')
   await ui.press({ key: 'tab-others' })
   expect(JSON.stringify(await ui.drawn())).toContain('追蹤的票')
+  await ui.unmount()
+})
+
+test('共用快取：未過期就沿用、有人在抓就等、過期或手動才抓', async () => {
+  const now = 10 * 60 * 1000
+  const lists = { fetchedAtMs: now - 60 * 1000, mine: [] }
+  expect(cacheDecision({ provider: 'gitlab', lists }, 'gitlab', now, false)).toBe('use')
+  expect(cacheDecision({ provider: 'gitlab', lists }, 'gitlab', now, true)).toBe('fetch')
+  expect(cacheDecision({ provider: 'github', lists }, 'gitlab', now, false)).toBe('fetch')
+  expect(cacheDecision(undefined, 'gitlab', now, false)).toBe('fetch')
+  const stale = { fetchedAtMs: now - 6 * 60 * 1000, mine: [] }
+  expect(cacheDecision({ provider: 'gitlab', lists: stale }, 'gitlab', now, false)).toBe('fetch')
+  expect(cacheDecision({ provider: 'gitlab', lists: stale, fetchingAtMs: now - 5000 }, 'gitlab', now, false)).toBe('use')
+  expect(cacheDecision({ provider: 'gitlab', fetchingAtMs: now - 5000 }, 'gitlab', now, false)).toBe('wait')
+  expect(cacheDecision({ provider: 'gitlab', fetchingAtMs: now - 2 * 60 * 1000 }, 'gitlab', now, false)).toBe('fetch')
+})
+
+test('開 session 時同專案快取還新就直接用，不再呼叫 gh；手動重新整理才抓並寫回快取', async ($, on) => {
+  const now = Date.UTC(2026, 9, 8)
+  const cacheFile = '/r/.git/gl-issues-cache.json'
+  const cached = { number: 7, title: '快取裡的票', labels: ['進行中'], url: 'u7', updatedAt: '' }
+  const files: Record<string, string> = {
+    [cacheFile]: JSON.stringify({ provider: 'github', lists: { fetchedAtMs: now - 60 * 1000, mine: [{ iid: 7, title: cached.title, labels: cached.labels, web_url: 'u7', updated_at: '' }] } }),
+  }
+  const issueCalls: string[][] = []
+  on('process.run', async (_$, e) => {
+    const argv = [...e.argv]
+    let stdout = '[]'
+    if (argv[0] === 'git') stdout = argv.includes('rev-parse') ? '/r/.git\n' : 'https://github.com/o/r.git\n'
+    else if (argv[0] === 'gh') {
+      issueCalls.push(argv)
+      stdout = JSON.stringify([{ number: 8, title: '新抓的票', labels: [{ name: '進行中' }], url: 'u8', updatedAt: '' }])
+    }
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('fs.read', async (_$, e) => {
+    const path = (e as { path: string }).path
+    if (!(path in files)) throw new Error('ENOENT')
+    return { value: files[path] } as never
+  })
+  on('fs.write', async (_$, e) => {
+    const { path, text } = e as { path: string; text: string }
+    files[path] = text
+    return { value: undefined } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: now }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  on('command.register', async () => ({ value: undefined }) as never)
+  on('clock.every', async () => ({ value: undefined }) as never)
+  on('session.start', async () => ({ cwd: '/r' }) as never)
+  await $.session.start({ cwd: '/r', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  expect(JSON.stringify(await ui.drawn())).toContain('快取裡的票')
+  expect(issueCalls).toEqual([])
+  await $.command.run({ command: 'gl-issues', args: '' })
+  expect(issueCalls.length).toBe(3)
+  expect(JSON.stringify(await ui.drawn())).toContain('新抓的票')
+  const written = JSON.parse(files[cacheFile]!) as { lists: { mine: { iid: number }[] }; fetchingAtMs?: number }
+  expect(written.lists.mine.map(i => i.iid)).toEqual([8])
+  expect(written.fetchingAtMs).toBeUndefined()
   await ui.unmount()
 })

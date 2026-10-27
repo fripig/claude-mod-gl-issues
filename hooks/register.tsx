@@ -74,7 +74,7 @@ async function initBoard($: EngineInterface): Promise<string> {
   const path = `${cwd}/CLAUDE.md`
   const existing = await $.fs.read(path).catch(() => undefined)
   await $.fs.write(path, withBoardSection(existing, DEFAULT_BOARD))
-  await refresh($)
+  await refresh($, 'rebuild')
   return `已在 ${path} ${existing === undefined ? '建立' : '加上'}「## Issue 狀態」段落，改成自己 board 的 label 後按重新整理即可。`
 }
 
@@ -297,7 +297,7 @@ async function startSession($: EngineInterface, provider: Provider, issue: Issue
     // 初始 prompt 等 claude 就緒後才送進輸入框，不經 shell，標題裡的引號、$ 不會被解讀
     const prompted = await $.process.run(['herdr', 'agent', 'prompt', pane, initialPrompt(provider, issue)])
     if (prompted.exitCode !== 0) throw new Error(prompted.stderr.trim() || prompted.stdout.trim() || `exit ${prompted.exitCode}`)
-    await refresh($)
+    await refresh($, 'rebuild')
   } catch (err) {
     $.ui.toast(`開 session 失敗：${String(err)}`)
   } finally {
@@ -308,9 +308,59 @@ async function startSession($: EngineInterface, provider: Provider, issue: Issue
 // register 時由 options 設定；每次重載模組都重新讀
 let tracked: string[] = []
 
-async function refresh($: EngineInterface) {
-  const fetchedAt = new Date(await $.clock.now()).toLocaleTimeString('zh-TW', { hour12: false })
-  const provider = await currentProvider($)
+// 抓回來的原始清單；同一專案（含 worktree）的所有 session 共用一份，存在 git common dir 底下
+export type Lists = {
+  fetchedAtMs: number
+  mine: RawIssue[]
+  all?: RawIssue[]
+  allError?: string
+  closed?: RawIssue[]
+  closedError?: string
+}
+// fetchingAtMs：有 session 正在抓，其他 session 先等它寫回來，不重複抓
+export type IssueCache = { provider: Provider; lists?: Lists; fetchingAtMs?: number }
+
+const POLL_MS = 30 * 1000
+const FETCH_LOCK_MS = 60 * 1000
+
+// use：沿用快取；fetch：自己去抓；wait：別的 session 正在抓、目前也沒資料可顯示
+export const cacheDecision = (cache: IssueCache | undefined, provider: Provider, now: number, force: boolean): 'use' | 'fetch' | 'wait' => {
+  const same = cache?.provider === provider ? cache : undefined
+  if (force) return 'fetch'
+  if (same?.lists && now - same.lists.fetchedAtMs < REFRESH_MS) return 'use'
+  if (same?.fetchingAtMs !== undefined && now - same.fetchingAtMs < FETCH_LOCK_MS) return same.lists ? 'use' : 'wait'
+  return 'fetch'
+}
+
+async function cachePath($: EngineInterface): Promise<string | undefined> {
+  try {
+    const res = await $.process.run(['git', '-C', await $.session.cwd(), 'rev-parse', '--path-format=absolute', '--git-common-dir'], { timeoutMs: 5000 })
+    return res.exitCode === 0 && res.stdout.trim() ? `${res.stdout.trim()}/gl-issues-cache.json` : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function readCache($: EngineInterface, path: string | undefined): Promise<IssueCache | undefined> {
+  if (!path) return undefined
+  try {
+    return JSON.parse(await $.fs.read(path)) as IssueCache
+  } catch {
+    return undefined
+  }
+}
+
+// 快取寫不進去（不是 git repo、權限）就只是退回各自抓，不影響顯示
+async function writeCache($: EngineInterface, path: string | undefined, cache: IssueCache) {
+  if (!path) return
+  try {
+    await $.fs.write(path, JSON.stringify(cache))
+  } catch {
+    // 下次再試
+  }
+}
+
+async function fetchLists($: EngineInterface, provider: Provider): Promise<Lists> {
   const p = PROVIDERS[provider]
   const list = async (tab: Tab): Promise<RawIssue[]> => {
     const res = await $.process.run(p.list(tab), { timeoutMs: 30000 })
@@ -324,42 +374,94 @@ async function refresh($: EngineInterface) {
   )
   const allRequest = settle('others')
   const closedRequest = settle('closed')
-  try {
-    const mine = await list('mine')
-    const all = await allRequest
-    const closed = await closedRequest
-    let agents: AgentMentions[] = []
-    let herdrError: string | undefined
-    try {
-      const m = await $.process.run(['bash', '-c', MATCH_SCRIPT], { timeoutMs: 30000 })
-      if (m.exitCode !== 0) throw new Error(m.stderr.trim().split('\n')[0] || `exit ${m.exitCode}`)
-      agents = JSON.parse(m.stdout) as AgentMentions[]
-    } catch (err) {
-      herdrError = String(err)
-    }
-    const cwd = await $.session.cwd()
-    const local = agents.filter(a => sameProject(a.cwd, cwd))
-    const board = await loadBoard($, cwd)
-    const build = (raws: RawIssue[]) => attachSessions(raws.map(r => toIssue(r, board)), local)
-    // 追蹤中的 issue 從整個專案的清單篩出；那份清單失敗時「我的」只剩指派給我的
-    const extra = all.raws ? trackedOf(all.raws, mine, tracked) : []
-    const issues = [...build(mine), ...build(extra).map(i => ({ ...i, tracked: true }))]
-    await update($, snapshot, prev => ({
-      provider,
-      board,
-      issues,
-      others: all.raws ? build(othersOf(all.raws, [...mine, ...extra])) : prev?.others ?? [],
-      closed: closed.raws ? build(closed.raws) : prev?.closed ?? [],
-      fetchedAt,
-      herdrError,
-      othersError: all.error,
-      closedError: closed.error,
-    }))
-    $.ui.status(`${p.short}: ${summarize(issues, board) || '無待辦'}`)
-  } catch (err) {
-    await update($, snapshot, prev => ({ provider, board: prev?.board ?? DEFAULT_BOARD, issues: prev?.issues ?? [], others: prev?.others ?? [], closed: prev?.closed ?? [], fetchedAt, error: String(err) }))
-    $.ui.status(`${p.short}: 讀取失敗`)
+  const mine = await list('mine')
+  const all = await allRequest
+  const closed = await closedRequest
+  return {
+    fetchedAtMs: await $.clock.now(),
+    mine,
+    ...(all.raws ? { all: all.raws } : { allError: all.error }),
+    ...(closed.raws ? { closed: closed.raws } : { closedError: closed.error }),
   }
+}
+
+// 這個 session 上次畫面用的是哪一份清單、herdr 何時比對過
+let shownFetchedAtMs: number | undefined
+let matchedAtMs = 0
+// 同一個 session 的 refresh 依序跑，不疊著抓
+let queue: Promise<void> = Promise.resolve()
+
+// poll：只讀共用快取，過期才抓；rebuild：重新比對 herdr session、重讀 CLAUDE.md；fetch：不管快取直接抓
+type RefreshMode = 'poll' | 'rebuild' | 'fetch'
+
+function refresh($: EngineInterface, mode: RefreshMode = 'poll'): Promise<void> {
+  const run = queue.then(() => refreshOnce($, mode))
+  queue = run.catch(() => undefined)
+  return run
+}
+
+async function refreshOnce($: EngineInterface, mode: RefreshMode) {
+  const provider = await currentProvider($)
+  const p = PROVIDERS[provider]
+  const path = await cachePath($)
+  const now = await $.clock.now()
+  const cache = await readCache($, path)
+  const decision = cacheDecision(cache, provider, now, mode === 'fetch')
+  if (decision === 'wait') return
+  let lists = cache?.provider === provider ? cache.lists : undefined
+  if (decision === 'fetch') {
+    await writeCache($, path, { provider, ...(lists ? { lists } : {}), fetchingAtMs: now })
+    try {
+      lists = await fetchLists($, provider)
+      await writeCache($, path, { provider, lists })
+    } catch (err) {
+      // 鎖要放掉，舊資料留著
+      await writeCache($, path, { provider, ...(lists ? { lists } : {}) })
+      const fetchedAt = new Date(now).toLocaleTimeString('zh-TW', { hour12: false })
+      await update($, snapshot, prev => ({ provider, board: prev?.board ?? DEFAULT_BOARD, issues: prev?.issues ?? [], others: prev?.others ?? [], closed: prev?.closed ?? [], fetchedAt, error: String(err) }))
+      $.ui.status(`${p.short}: 讀取失敗`)
+      return
+    }
+  }
+  if (!lists) return
+  const changed = lists.fetchedAtMs !== shownFetchedAtMs
+  if (mode === 'poll' && !changed && now - matchedAtMs < REFRESH_MS) return
+  shownFetchedAtMs = lists.fetchedAtMs
+  matchedAtMs = now
+  await show($, provider, lists)
+}
+
+async function show($: EngineInterface, provider: Provider, lists: Lists) {
+  const p = PROVIDERS[provider]
+  let agents: AgentMentions[] = []
+  let herdrError: string | undefined
+  try {
+    const m = await $.process.run(['bash', '-c', MATCH_SCRIPT], { timeoutMs: 30000 })
+    if (m.exitCode !== 0) throw new Error(m.stderr.trim().split('\n')[0] || `exit ${m.exitCode}`)
+    agents = JSON.parse(m.stdout) as AgentMentions[]
+  } catch (err) {
+    herdrError = String(err)
+  }
+  const cwd = await $.session.cwd()
+  const local = agents.filter(a => sameProject(a.cwd, cwd))
+  const board = await loadBoard($, cwd)
+  const build = (raws: RawIssue[]) => attachSessions(raws.map(r => toIssue(r, board)), local)
+  const { mine, all, closed } = lists
+  // 追蹤中的 issue 從整個專案的清單篩出；那份清單失敗時「我的」只剩指派給我的
+  const extra = all ? trackedOf(all, mine, tracked) : []
+  const issues = [...build(mine), ...build(extra).map(i => ({ ...i, tracked: true }))]
+  await update($, snapshot, prev => ({
+    provider,
+    board,
+    issues,
+    others: all ? build(othersOf(all, [...mine, ...extra])) : prev?.others ?? [],
+    closed: closed ? build(closed) : prev?.closed ?? [],
+    fetchedAt: new Date(lists.fetchedAtMs).toLocaleTimeString('zh-TW', { hour12: false }),
+    herdrError,
+    ...(lists.allError ? { othersError: lists.allError } : {}),
+    ...(lists.closedError ? { closedError: lists.closedError } : {}),
+  }))
+  $.ui.status(`${p.short}: ${summarize(issues, board) || '無待辦'}`)
 }
 
 export const register: Register = (on, options) => {
@@ -368,7 +470,8 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
     await $.command.register({ name: 'gl-issues-init', description: '在專案 CLAUDE.md 寫入預設的 issue 狀態 label 清單' })
     void refresh($)
-    $.clock.every(REFRESH_MS, () => void refresh($))
+    // 只讀共用快取，便宜；過期時由先輪到的 session 去抓
+    $.clock.every(POLL_MS, () => void refresh($))
     void currentProvider($).then(provider => $.ui.open({ id: PANE, title: paneTitle(provider) }))
     return next(e)
   })
@@ -378,7 +481,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'gl-issues' }, async $ => {
     const provider = await currentProvider($)
     await $.ui.open({ id: PANE, title: paneTitle(provider) })
-    await refresh($)
+    await refresh($, 'fetch')
     return { text: `${PROVIDERS[provider].name} issue 面板已開啟並重新整理。` }
   })
 
@@ -397,7 +500,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1}>
           <Text dimColor>{snap ? `更新於 ${snap.fetchedAt}` : '讀取中…'}</Text>
-          <Button onPress={() => void refresh($)}>重新整理</Button>
+          <Button onPress={() => void refresh($, 'fetch')}>重新整理</Button>
           {groups.length > 0 && (
             <Button
               key="toggle-all"

@@ -21,7 +21,7 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
 - **對應本機 session**：從 herdr 分頁標題／label、工作目錄（`gl-<id>-` worktree）與使用者自己輸入的 prompt 抽出 issue 編號（`#123`、`gl-123-`、issue 網址、`issue 123`），點 `↪` 用 `herdr tab focus` 切到那個分頁、再 `herdr agent focus` 那個 pane。
 - **開 issue 頁面**：點票號 `#<id>` 用系統預設瀏覽器打開（macOS `open`，其他系統 `xdg-open`），不靠終端機的超連結支援。
 - **開新 session**：每張 issue 都有 `▶`（已有 session 的也能再開一個，herdr agent 名稱依序用 `gl-<id>`、`gl-<id>-2`…避開重複），點了會開 herdr 分頁並以 `claude -n "#<id> <標題>"` 啟動，接著送出初始 prompt，請 Claude 用 `gh`／`glab` 讀 issue 內容與留言、摘要需求後停下等指示。
-- 每 5 分鐘自動刷新，或 `/gl-issues` 手動開啟並刷新。
+- **同專案共用一份資料**：抓回來的清單存在 repo 的 git 目錄（`.git/gl-issues-cache.json`，worktree 共用），同專案的所有 session 一起用；開新 session 時資料還沒超過 5 分鐘就直接顯示、不再呼叫 `glab`／`gh`。過期時由先輪到的 session 去抓，其他 session 約 30 秒內跟上。按「重新整理」或 `/gl-issues` 會立刻重抓。
 
 ## 需求
 
