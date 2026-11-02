@@ -1,4 +1,4 @@
-export type SessionRef = { pane: string; tab: string; title: string; status: string; count: number }
+export type SessionRef = { pane: string; tab: string; title: string; status: string; count: number; app?: boolean }
 // tracked：沒指派給我、因帶追蹤 label 併進「我的」分頁
 export type Issue = { iid: number; title: string; status: string; url: string; updatedAt: string; sessions: SessionRef[]; tracked?: boolean }
 export type Provider = 'github' | 'gitlab'

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, OPEN_URL_ARGV, PROVIDERS, agentName, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, MATCH_SCRIPT, OPEN_URL_ARGV, PLATFORM_ARGV, PROVIDERS, agentName, appTabArgv, focusArgvs, parsePlatform, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -167,6 +167,39 @@ test('herdr focus 啟動不了時跳 toast，不再無聲失敗', async ($, on) 
   const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
   await ui.press({ key: '9-w1:p9' })
   expect(toasts.join('|')).toContain('herdr 切換到 w1:p9 失敗')
+})
+
+test('平台判斷：只有 app 改走新方式，其他一律照舊用 herdr CLI', async () => {
+  expect(parsePlatform('app\n')).toBe('app')
+  expect(parsePlatform('herdr\n')).toBe('herdr')
+  expect(parsePlatform('')).toBe('herdr')
+})
+
+test('平台判斷與比對腳本共用同一段偵測：先看程序樹，找不到才看 HC_TERMINAL_ID', async () => {
+  for (const script of [PLATFORM_ARGV[2]!, MATCH_SCRIPT]) {
+    expect(script).toContain('detect_platform() {')
+    expect(script.indexOf('ps -o comm=')).toBeLessThan(script.indexOf('HC_TERMINAL_ID'))
+  }
+  expect(MATCH_SCRIPT).toContain('if [ "$(detect_platform)" = app ]')
+})
+
+test('app 的 session 用 herdr-app 切換，不碰舊版 herdr', async () => {
+  const ref = { pane: 't3', tab: '', title: 'api / 1', status: 'idle', count: 1, app: true }
+  expect(focusArgvs(ref)).toEqual([['herdr-app', 'do', 'agent.focus', '--terminal', 't3']])
+  expect(focusArgvs({ ...ref, app: undefined, tab: 'w1:t9', pane: 'w1:p9' })).toEqual([['herdr', 'tab', 'focus', 'w1:t9'], ['herdr', 'agent', 'focus', 'w1:p9']])
+})
+
+test('比對結果的 app 標記帶到 session', async () => {
+  const agent = { pane: 't3', tab: '', cwd: '/r', title: 'x', status: 'idle', app: true, mentions: [{ iid: 1, count: 1 }] }
+  expect(attachSessions([toIssue(raw(1, []))], [agent])[0]?.sessions[0]?.app).toBe(true)
+})
+
+test('app 開新 session：一次帶齊資料夾、claude 名稱與第一句話，標題不經 shell', async () => {
+  const issue = { ...toIssue(raw(12, [])), title: `a"b $(x)` }
+  const argv = appTabArgv('/r', 'github', issue)
+  expect(argv.slice(0, 3)).toEqual(['herdr-app', 'do', 'tab.new'])
+  expect(argv.length).toBe(4)
+  expect(JSON.parse(argv[3]!)).toEqual({ name: '#12', folder: '/r', argv: ['claude', '-n', '#12 a"b $(x)'], task: initialPrompt('github', issue) })
 })
 
 test('其他分頁：整個專案的 open issue 扣掉指派給我的；只有「我的」帶 assignee 條件', async () => {

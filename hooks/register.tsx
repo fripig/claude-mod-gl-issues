@@ -133,24 +133,68 @@ async function currentProvider($: EngineInterface): Promise<Provider> {
 }
 
 const paneTitle = (provider: Provider): string => `${PROVIDERS[provider].name} issues`
-export type AgentMentions = { pane: string; tab: string; cwd: string; title: string; status: string; mentions: { iid: number; count: number }[] }
+export type AgentMentions = { pane: string; tab: string; cwd: string; title: string; status: string; app?: boolean; mentions: { iid: number; count: number }[] }
 
-// 列出 herdr 裡的 Claude agent，從分頁標題、cwd（gl-<id>- worktree）與使用者自己打的 prompt
-// 抽出 issue 編號；transcript 全文含注入的 memory／git log，雜訊太多所以不掃
-const MATCH_SCRIPT = `export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
-snap=$(herdr api snapshot) || exit 1
-jq -c '.result.snapshot as $s | $s.agents[] | select(.agent == "claude") | . + {tab_label: (.tab_id as $t | first($s.tabs[] | select(.tab_id == $t) | .label) // "")}' <<<"$snap" | while IFS= read -r a; do
-  id=$(jq -r '.agent_session.value // empty' <<<"$a")
-  slug=$(jq -r '.cwd // ""' <<<"$a" | sed 's/[^A-Za-z0-9]/-/g')
+// agent 跑在哪個環境：從 Claude（腳本的父程序）沿父程序往上找，最近的是 herdr-core 就在 Herdr app 的 terminal 裡、
+// 是 herdr 就在 herdr CLI（TUI）的 pane 裡。環境變數會被巢狀的 terminal 繼承，只在程序樹找不到時才參考；
+// 都判斷不出來就照舊走 herdr CLI，不影響原本的行為。兩邊的 ID 互不相通，只比對、操作所在的那一邊
+export type Platform = 'app' | 'herdr'
+export const DETECT_SH = [
+  'detect_platform() {',
+  '  p=$PPID',
+  '  while [ "${p:-0}" -gt 1 ]; do',
+  '    c=$(ps -o comm= -p "$p" 2>/dev/null)',
+  '    case "${c##*/}" in',
+  '      herdr-core|hc) echo app; return ;;',
+  '      herdr) echo herdr; return ;;',
+  '    esac',
+  '    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d " ")',
+  '  done',
+  '  if [ -n "${HC_TERMINAL_ID:-}" ]; then echo app; else echo herdr; fi',
+  '}',
+].join('\n')
+export const PLATFORM_ARGV = ['bash', '-c', `${DETECT_SH}\ndetect_platform`]
+export const parsePlatform = (stdout: string): Platform => (stdout.trim() === 'app' ? 'app' : 'herdr')
+
+async function currentPlatform($: EngineInterface): Promise<Platform> {
+  const res = await $.process.run(PLATFORM_ARGV, { timeoutMs: 10000 })
+  return res.exitCode === 0 ? parsePlatform(res.stdout) : 'herdr'
+}
+
+// 列出目前前端裡的 Claude agent，從標題、分頁名稱、cwd（gl-<id>- worktree）與使用者自己打的 prompt
+// 抽出 issue 編號；transcript 全文含注入的 memory／git log，雜訊太多所以不掃。
+// app 的 .cwd 是 terminal 起始目錄，要看 foreground.cwd；hc 不回 session id，靠 foreground.pid 對 ~/.claude/sessions；
+// 沒有 herdr.space label 的是背景 worker，視窗切不過去所以略過
+export const MATCH_SCRIPT = `export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+${DETECT_SH}
+app=false
+if [ "$(detect_platform)" = app ]; then
+  app=true
+  list=$(hc ls --json) || exit 1
+  agents=$(jq -r '.terminals[] | select(.agent == "claude-code") | .address' <<<"$list" | while IFS= read -r t; do
+    hc get "$t" --json | jq -c 'select(.labels["herdr.space"]) | (.foreground.cwd // .cwd // "") as $cwd | {pane: .address, tab: "", cwd: $cwd, fcwd: $cwd, title: (.labels.where // .title // ""), hint: (.title // ""), status: (.status.state // ""), pid: .foreground.pid}'
+  done)
+else
+  snap=$(herdr api snapshot) || exit 1
+  agents=$(jq -c '.result.snapshot as $s | $s.agents[] | select(.agent == "claude") | {pane: .pane_id, tab: (.tab_id // ""), cwd: (.cwd // ""), fcwd: (.foreground_cwd // ""), title: (.terminal_title_stripped // ""), hint: (.tab_id as $t | first($s.tabs[] | select(.tab_id == $t) | .label) // ""), status: (.agent_status // ""), session: .agent_session.value}' <<<"$snap")
+fi
+while IFS= read -r a; do
+  [ -n "$a" ] || continue
+  id=$(jq -r '.session // empty' <<<"$a")
+  pid=$(jq -r '.pid // empty' <<<"$a")
+  if [ -z "$id" ] && [ -n "$pid" ]; then
+    id=$(jq -r '.sessionId // empty' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)
+  fi
+  slug=$(jq -r '.cwd' <<<"$a" | sed 's/[^A-Za-z0-9]/-/g')
   f="$HOME/.claude/projects/$slug/$id.jsonl"
   {
-    jq -r '.terminal_title_stripped // "", .tab_label, .foreground_cwd // ""' <<<"$a"
+    jq -r '.title, .hint, .fcwd' <<<"$a"
     if [ -n "$id" ] && [ -f "$f" ]; then
       grep -F '"type":"user"' "$f" | jq -r 'select(.type == "user" and (.message.content | type == "string")) | .message.content' 2>/dev/null | grep -v '^<'
     fi
   } | perl -nle 'print $1 while m{(?:/(?:work_items|issues)/|\\bgl-|#|(?i:issue|work item|票) ?#?)(\\d{1,5})\\b}g' | sort | uniq -c \\
-    | jq -Rsc --argjson a "$a" '{pane: $a.pane_id, tab: ($a.tab_id // ""), cwd: ($a.cwd // ""), title: ($a.terminal_title_stripped // ""), status: ($a.agent_status // ""), mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]}'
-done | jq -sc .`
+    | jq -Rsc --argjson a "$a" --argjson app "$app" '{pane: $a.pane, tab: $a.tab, cwd: $a.cwd, title: $a.title, status: $a.status, mentions: [split("\\n")[] | select(length > 0) | capture(" *(?<c>[0-9]+) (?<n>[0-9]+)") | {iid: (.n | tonumber), count: (.c | tonumber)}]} + (if $app then {app: true} else {} end)'
+done <<<"$agents" | jq -sc .`
 
 export const toIssue = (raw: RawIssue, board: Board = DEFAULT_BOARD): Issue => ({
   iid: raw.iid,
@@ -171,7 +215,7 @@ export const attachSessions = (issues: Issue[], agents: AgentMentions[]): Issue[
     sessions: agents
       .flatMap((a): SessionRef[] => {
         const hit = a.mentions.find(m => m.iid === issue.iid)
-        return hit ? [{ pane: a.pane, tab: a.tab, title: a.title, status: a.status, count: hit.count }] : []
+        return hit ? [{ pane: a.pane, tab: a.tab, title: a.title, status: a.status, count: hit.count, ...(a.app ? { app: true } : {}) }] : []
       })
       .sort((x, y) => y.count - x.count),
   }))
@@ -230,10 +274,13 @@ async function openIssue($: EngineInterface, issue: Issue) {
 
 // herdr server 0.9.0 的 agent focus 只改內部焦點、畫面不會切（0.9.3 已修），先 tab focus 切到那個分頁，
 // 再 agent focus 讓分頁裡的對應 pane 拿到焦點（分頁有分割時才有差）
-export const focusArgvs = (ref: SessionRef): string[][] => [
-  ...(ref.tab ? [['herdr', 'tab', 'focus', ref.tab]] : []),
-  ['herdr', 'agent', 'focus', ref.pane],
-]
+// app 的 agent.focus 會自己切到那個 terminal 所在的 space 與分頁
+export const focusArgvs = (ref: SessionRef): string[][] => ref.app
+  ? [['herdr-app', 'do', 'agent.focus', '--terminal', ref.pane]]
+  : [
+      ...(ref.tab ? [['herdr', 'tab', 'focus', ref.tab]] : []),
+      ['herdr', 'agent', 'focus', ref.pane],
+    ]
 
 // 按鈕的 handler 是 void 呼叫，process.run reject（啟動不了、逾時）不接住就會無聲失敗
 async function focusSession($: EngineInterface, ref: SessionRef) {
@@ -278,13 +325,30 @@ export const initialPrompt = (provider: Provider, issue: Issue): string => {
 
 const launching = new Set<number>()
 
-// 開新 herdr 分頁跑 claude，session 名帶 #<iid>，下次刷新時分頁標題就會對回這張 issue
+// app 用一次 tab.new 同時開分頁、啟動 claude、送第一句話；整包 JSON 傳入，標題裡的引號、$ 不會被解讀
+export const appTabArgv = (cwd: string, provider: Provider, issue: Issue): string[] => [
+  'herdr-app', 'do', 'tab.new',
+  JSON.stringify({ name: `#${issue.iid}`, folder: cwd, argv: ['claude', '-n', sessionName(issue)], task: initialPrompt(provider, issue) }),
+]
+
+async function startAppSession($: EngineInterface, provider: Provider, issue: Issue, cwd: string) {
+  const res = await $.process.run(appTabArgv(cwd, provider, issue), { timeoutMs: 60000 })
+  if (res.exitCode !== 0) throw new Error(res.stdout.trim() || res.stderr.trim() || `exit ${res.exitCode}`)
+}
+
+// 開新分頁跑 claude，session 名帶 #<iid>，下次刷新時分頁標題就會對回這張 issue
 async function startSession($: EngineInterface, provider: Provider, issue: Issue) {
   if (launching.has(issue.iid)) return
   launching.add(issue.iid)
   const name = sessionName(issue)
   try {
     const cwd = await $.session.cwd()
+    const platform = await currentPlatform($)
+    if (platform === 'app') {
+      await startAppSession($, provider, issue, cwd)
+      await refresh($, 'rebuild')
+      return
+    }
     const tab = await $.process.run(['herdr', 'tab', 'create', '--focus', '--cwd', cwd, '--label', `#${issue.iid}`])
     if (tab.exitCode !== 0) throw new Error(tab.stderr.trim() || `exit ${tab.exitCode}`)
     const pane = (JSON.parse(tab.stdout) as { result: { root_pane: { pane_id: string } } }).result.root_pane.pane_id
