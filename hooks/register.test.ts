@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, MATCH_SCRIPT, OPEN_URL_ARGV, PLATFORM_ARGV, PROVIDERS, agentName, appTabArgv, focusArgvs, parsePlatform, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, MATCH_SCRIPT, START_MAX_TRIES, herdrErrorCode, OPEN_URL_ARGV, PLATFORM_ARGV, PROVIDERS, agentName, appTabArgv, focusArgvs, parsePlatform, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -453,4 +453,72 @@ test('開 session 時同專案快取還新就直接用，不再呼叫 gh；手�
   expect(written.lists.mine.map(i => i.iid)).toEqual([8])
   expect(written.fetchingAtMs).toBeUndefined()
   await ui.unmount()
+})
+
+const busyErr = JSON.stringify({ error: { code: 'agent_pane_busy', message: 'agent target pane w1:p5 is not an available shell' } })
+
+// ▶ 走 herdr CLI；agent start 依序回 startResults，回傳所有呼叫與 toast
+const pressStart = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], startResults: { exitCode: number; stderr: string }[]) => {
+  const argvs: string[][] = []
+  const toasts: string[] = []
+  const sleeps: number[] = []
+  let starts = 0
+  on('process.run', async (_$, e) => {
+    argvs.push(e.argv)
+    const [cmd, sub, verb] = e.argv
+    let out = { exitCode: 0, stdout: '', stderr: '' }
+    if (cmd === 'git') out.stdout = 'https://github.com/o/r.git\n'
+    else if (cmd === 'bash') out.stdout = e.argv[2] === PLATFORM_ARGV[2] ? 'herdr\n' : '[]'
+    else if (cmd === 'herdr' && sub === 'tab') out.stdout = JSON.stringify({ result: { root_pane: { pane_id: 'w1:p5' } } })
+    else if (cmd === 'herdr' && sub === 'agent' && verb === 'list') out.stdout = JSON.stringify({ result: { agents: [] } })
+    else if (cmd === 'herdr' && sub === 'agent' && verb === 'start') out = { stdout: '', ...(startResults[starts++] ?? { exitCode: 0, stderr: '' }) }
+    else if (cmd === 'gh') out.stdout = JSON.stringify([{ number: 9, title: 't9', labels: [{ name: '進行中' }], url: 'u', updatedAt: '' }])
+    return { value: { ...out, isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('clock.now', async () => ({ value: Date.UTC(2026, 9, 8) }) as never)
+  on('clock.sleep', async (_$, e) => {
+    sleeps.push((e as { ms: number }).ms)
+    return { value: undefined } as never
+  })
+  on('ui.status', async () => ({ value: undefined }) as never)
+  on('ui.open', async () => ({ value: { isPlaced: true } }) as never)
+  on('ui.toast', async (_$, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
+  await $.command.run({ command: 'gl-issues', args: '' })
+  const ui = await $.ui.mount({ plugin: 'gl-issues', surface: 'terminal', component: 'Pane', requestId: 'gl-issues', props: { title: 'GitHub issues' } as never })
+  await ui.press({ key: 'start-9' })
+  await ui.unmount()
+  const count = (verb: string) => argvs.filter(a => a[0] === 'herdr' && a[1] === 'agent' && a[2] === verb).length
+  return { toasts, sleeps, starts: count('start'), prompts: count('prompt') }
+}
+
+test('herdr 錯誤輸出讀得出 code，不是 JSON 就沒有', async () => {
+  expect(herdrErrorCode(busyErr)).toBe('agent_pane_busy')
+  expect(herdrErrorCode('spawn herdr ENOENT')).toBeUndefined()
+})
+
+test('新分頁的 shell 還在忙時等它空下來再啟動 claude，不留下空分頁', async ($, on) => {
+  const r = await pressStart($, on, [{ exitCode: 1, stderr: busyErr }, { exitCode: 1, stderr: busyErr }])
+  expect(r.starts).toBe(3)
+  expect(r.sleeps.length).toBe(2)
+  expect(r.prompts).toBe(1)
+  expect(r.toasts).toEqual([])
+})
+
+test('其他啟動錯誤不重試，直接跳 toast', async ($, on) => {
+  const taken = JSON.stringify({ error: { code: 'agent_name_taken', message: 'agent name gl-9 is already used' } })
+  const r = await pressStart($, on, [{ exitCode: 1, stderr: taken }])
+  expect(r.starts).toBe(1)
+  expect(r.prompts).toBe(0)
+  expect(r.toasts.join('|')).toContain('agent_name_taken')
+})
+
+test('shell 一直忙就在上限後放棄並跳 toast', async ($, on) => {
+  const r = await pressStart($, on, Array.from({ length: START_MAX_TRIES + 5 }, () => ({ exitCode: 1, stderr: busyErr })))
+  expect(r.starts).toBe(START_MAX_TRIES)
+  expect(r.prompts).toBe(0)
+  expect(r.toasts.join('|')).toContain('agent_pane_busy')
 })

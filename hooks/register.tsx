@@ -325,6 +325,30 @@ export const initialPrompt = (provider: Provider, issue: Issue): string => {
 
 const launching = new Set<number>()
 
+// herdr CLI 的 agent start 只在 pane 剛建好、還認不出 shell 時自己等；新分頁的 shell 啟動腳本還在跑時
+// 會立刻回 agent_pane_busy 放棄，留下沒跑 claude 的空分頁。這種情況由 mod 自己等 shell 空下來再試
+export const START_RETRY_MS = 500
+export const START_MAX_TRIES = 60
+
+export const herdrErrorCode = (out: string): string | undefined => {
+  try {
+    const code = (JSON.parse(out) as { error?: { code?: unknown } }).error?.code
+    return typeof code === 'string' ? code : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function startAgent($: EngineInterface, argv: string[]) {
+  for (let attempt = 1; ; attempt++) {
+    const res = await $.process.run(argv, { timeoutMs: 60000 })
+    if (res.exitCode === 0) return
+    const busy = [res.stderr, res.stdout].some(out => herdrErrorCode(out.trim()) === 'agent_pane_busy')
+    if (!busy || attempt >= START_MAX_TRIES) throw new Error(res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`)
+    await $.clock.sleep(START_RETRY_MS)
+  }
+}
+
 // app 用一次 tab.new 同時開分頁、啟動 claude、送第一句話；整包 JSON 傳入，標題裡的引號、$ 不會被解讀
 export const appTabArgv = (cwd: string, provider: Provider, issue: Issue): string[] => [
   'herdr-app', 'do', 'tab.new',
@@ -353,11 +377,7 @@ async function startSession($: EngineInterface, provider: Provider, issue: Issue
     if (tab.exitCode !== 0) throw new Error(tab.stderr.trim() || `exit ${tab.exitCode}`)
     const pane = (JSON.parse(tab.stdout) as { result: { root_pane: { pane_id: string } } }).result.root_pane.pane_id
     // herdr 的 agent 名稱只收小寫英數、-、_；顯示用的名稱交給 claude -n 與分頁 label
-    const started = await $.process.run(
-      ['herdr', 'agent', 'start', freeAgentName(issue, await liveAgentNames($)), '--kind', 'claude', '--pane', pane, '--', '-n', name],
-      { timeoutMs: 60000 },
-    )
-    if (started.exitCode !== 0) throw new Error(started.stderr.trim() || started.stdout.trim() || `exit ${started.exitCode}`)
+    await startAgent($, ['herdr', 'agent', 'start', freeAgentName(issue, await liveAgentNames($)), '--kind', 'claude', '--pane', pane, '--', '-n', name])
     // 初始 prompt 等 claude 就緒後才送進輸入框，不經 shell，標題裡的引號、$ 不會被解讀
     const prompted = await $.process.run(['herdr', 'agent', 'prompt', pane, initialPrompt(provider, issue)])
     if (prompted.exitCode !== 0) throw new Error(prompted.stderr.trim() || prompted.stdout.trim() || `exit ${prompted.exitCode}`)
