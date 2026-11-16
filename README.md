@@ -20,6 +20,7 @@ Claude Code mod：在側邊面板列出指派給自己的 GitLab／GitHub open i
 - **狀態列摘要**：`GL: 進行中 2 · 討論中 5`（GitHub repo 顯示 `GH:`）。
 - **對應本機 session**：從 herdr 分頁標題／label、工作目錄（`gl-<id>-` worktree）與使用者自己輸入的 prompt 抽出 issue 編號（`#123`、`gl-123-`、issue 網址、`issue 123`），點 `↪` 切到那個 session。
 - **自動判斷平台**：從 Claude 沿父程序往上找，最近的是 `herdr-core` 就是在 Herdr app 的 terminal 裡、是 `herdr` 就是在 herdr CLI 的 pane 裡（程序樹找不到時才看 `HC_TERMINAL_ID`）。在 app 裡改用 `hc` 列 session、`herdr-app do agent.focus` 切換、`herdr-app do tab.new` 開新 session；其他情況照舊走 herdr CLI（`herdr tab focus` + `herdr agent focus`）。兩邊 ID 不通，只比對目前所在那一邊的 session。
+- **Herdr app 裡不自動開**：Herdr app 有自己的 [issue-launcher](https://github.com/fripig/herdr-mod-issue-launcher) mod，判斷在 app 的 terminal 裡時，session 啟動不開面板、不輪詢；要看時用 `/gl-issues` 手動開（手動開的面板不會每 5 分鐘自動更新）。
 - **開 issue 頁面**：點票號 `#<id>` 用系統預設瀏覽器打開（macOS `open`，其他系統 `xdg-open`），不靠終端機的超連結支援。
 - **開新 session**：每張 issue 都有 `▶`（已有 session 的也能再開一個，TUI 的 agent 名稱依序用 `gl-<id>`、`gl-<id>-2`…避開重複），點了會在目前的平台開新分頁並以 `claude -n "#<id> <標題>"` 啟動，同時送出初始 prompt，請 Claude 用 `gh`／`glab` 讀 issue 內容與留言、摘要需求後停下等指示。
 - **同專案共用一份資料**：抓回來的清單存在 repo 的 git 目錄（`.git/gl-issues-cache.json`，worktree 共用），同專案的所有 session 一起用；開新 session 時資料還沒超過 5 分鐘就直接顯示、不再呼叫 `glab`／`gh`。過期時由先輪到的 session 去抓，其他 session 約 30 秒內跟上。按「重新整理」或 `/gl-issues` 會立刻重抓。

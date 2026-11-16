@@ -522,3 +522,26 @@ test('shell 一直忙就在上限後放棄並跳 toast', async ($, on) => {
   expect(r.prompts).toBe(0)
   expect(r.toasts.join('|')).toContain('agent_pane_busy')
 })
+
+test('在 Herdr app 的 terminal 裡啟動時不自動開面板、不輪詢', async ($, on) => {
+  const opened: unknown[] = []
+  const timers: unknown[] = []
+  on('process.run', async (_$, e) => {
+    const stdout = e.argv[0] === 'bash' && e.argv[2]?.endsWith('detect_platform') ? 'app\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('command.register', async () => ({ value: undefined }) as never)
+  on('clock.every', async e => {
+    timers.push(e)
+    return { value: undefined } as never
+  })
+  on('ui.open', async (_$, e) => {
+    opened.push(e)
+    return { value: { isPlaced: true } } as never
+  })
+  on('session.start', async () => ({ cwd: '/r' }) as never)
+  await $.session.start({ cwd: '/r', surface: 'terminal', isInteractive: true })
+  await new Promise(r => setTimeout(r, 50))
+  expect(opened).toEqual([])
+  expect(timers).toEqual([])
+})

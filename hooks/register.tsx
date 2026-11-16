@@ -553,10 +553,15 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
     await $.command.register({ name: 'gl-issues-init', description: '在專案 CLAUDE.md 寫入預設的 issue 狀態 label 清單' })
-    void refresh($)
-    // 只讀共用快取，便宜；過期時由先輪到的 session 去抓
-    $.clock.every(POLL_MS, () => void refresh($))
-    void currentProvider($).then(provider => $.ui.open({ id: PANE, title: paneTitle(provider) }))
+    // Herdr app 有自己的 issue-launcher mod 列 issue；跑在 app 的 terminal 裡就不自動開面板、不輪詢，
+    // 要看時仍可用 /gl-issues 手動開
+    void currentPlatform($).then(platform => {
+      if (platform === 'app') return
+      void refresh($)
+      // 只讀共用快取，便宜；過期時由先輪到的 session 去抓
+      $.clock.every(POLL_MS, () => void refresh($))
+      void currentProvider($).then(provider => $.ui.open({ id: PANE, title: paneTitle(provider) }))
+    })
     return next(e)
   })
 
