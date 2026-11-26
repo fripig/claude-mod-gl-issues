@@ -161,6 +161,18 @@ async function currentPlatform($: EngineInterface): Promise<Platform> {
   return res.exitCode === 0 ? parsePlatform(res.stdout) : 'herdr'
 }
 
+// Herdr app 的 issue-launcher mod 裝了沒（https://github.com/fripig/herdr-mod-issue-launcher）：
+// 看 app 設定目錄（HERDR_APP_HOME，預設 ~/.config/herdr-app）的 mods/issue-launcher/mod.json
+export const LAUNCHER_ARGV = ['sh', '-c', 'test -f "${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods/issue-launcher/mod.json"']
+
+async function launcherInstalled($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.process.run(LAUNCHER_ARGV, { timeoutMs: 5000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
 // 列出目前前端裡的 Claude agent，從標題、分頁名稱、cwd（gl-<id>- worktree）與使用者自己打的 prompt
 // 抽出 issue 編號；transcript 全文含注入的 memory／git log，雜訊太多所以不掃。
 // app 的 .cwd 是 terminal 起始目錄，要看 foreground.cwd；hc 不回 session id，靠 foreground.pid 對 ~/.claude/sessions；
@@ -553,10 +565,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'gl-issues', description: '開啟並重新整理指派給我的 GitHub／GitLab issue 面板' })
     await $.command.register({ name: 'gl-issues-init', description: '在專案 CLAUDE.md 寫入預設的 issue 狀態 label 清單' })
-    // Herdr app 有自己的 issue-launcher mod 列 issue；跑在 app 的 terminal 裡就不自動開面板、不輪詢，
-    // 要看時仍可用 /gl-issues 手動開
-    void currentPlatform($).then(platform => {
-      if (platform === 'app') return
+    // 跑在 Herdr app 的 terminal 裡、且 app 裝了 issue-launcher mod 時，由它列 issue：
+    // 這裡就不自動開面板、不輪詢，要看時仍可用 /gl-issues 手動開
+    void currentPlatform($).then(async platform => {
+      if (platform === 'app' && (await launcherInstalled($))) return
       void refresh($)
       // 只讀共用快取，便宜；過期時由先輪到的 session 去抓
       $.clock.every(POLL_MS, () => void refresh($))

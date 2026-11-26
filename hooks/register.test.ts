@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { DEFAULT_BOARD, MATCH_SCRIPT, START_MAX_TRIES, herdrErrorCode, OPEN_URL_ARGV, PLATFORM_ARGV, PROVIDERS, agentName, appTabArgv, focusArgvs, parsePlatform, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
+import { DEFAULT_BOARD, LAUNCHER_ARGV, MATCH_SCRIPT, START_MAX_TRIES, herdrErrorCode, OPEN_URL_ARGV, PLATFORM_ARGV, PROVIDERS, agentName, appTabArgv, focusArgvs, parsePlatform, cacheDecision, freeAgentName, attachSessions, detectProvider, fromGitHub, groupsFor, initialPrompt, othersOf, parseBoard, trackedLabels, trackedOf, sameProject, withBoardSection, groupByStatus, sessionName, summarize, toggle, toIssue } from './register'
 
 const raw = (iid: number, labels: string[]) => ({ iid, title: `t${iid}`, labels, web_url: `u${iid}`, updated_at: '' })
 
@@ -523,13 +523,22 @@ test('shell 一直忙就在上限後放棄並跳 toast', async ($, on) => {
   expect(r.toasts.join('|')).toContain('agent_pane_busy')
 })
 
-test('在 Herdr app 的 terminal 裡啟動時不自動開面板、不輪詢', async ($, on) => {
+// 在 Herdr app 的 terminal 裡啟動 session；launcher 是 issue-launcher mod 裝了沒，回傳開過的面板與輪詢
+const startInApp = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], launcher: boolean) => {
   const opened: unknown[] = []
   const timers: unknown[] = []
   on('process.run', async (_$, e) => {
-    const stdout = e.argv[0] === 'bash' && e.argv[2]?.endsWith('detect_platform') ? 'app\n' : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+    const isLauncher = JSON.stringify(e.argv) === JSON.stringify(LAUNCHER_ARGV)
+    const stdout = JSON.stringify(e.argv) === JSON.stringify(PLATFORM_ARGV) ? 'app\n' : ''
+    const exitCode = isLauncher && !launcher ? 1 : 0
+    return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
+  on('session.cwd', async () => ({ value: '/r' }) as never)
+  on('fs.read', async () => {
+    throw new Error('ENOENT')
+  })
+  on('fs.write', async () => ({ value: undefined }) as never)
+  on('ui.status', async () => ({ value: undefined }) as never)
   on('command.register', async () => ({ value: undefined }) as never)
   on('clock.every', async e => {
     timers.push(e)
@@ -542,6 +551,22 @@ test('在 Herdr app 的 terminal 裡啟動時不自動開面板、不輪詢', as
   on('session.start', async () => ({ cwd: '/r' }) as never)
   await $.session.start({ cwd: '/r', surface: 'terminal', isInteractive: true })
   await new Promise(r => setTimeout(r, 50))
+  return { opened, timers }
+}
+
+test('Herdr app 裝了 issue-launcher 時，啟動不自動開面板、不輪詢', async ($, on) => {
+  const { opened, timers } = await startInApp($, on, true)
   expect(opened).toEqual([])
   expect(timers).toEqual([])
+})
+
+test('Herdr app 沒裝 issue-launcher 時照舊自動開面板並輪詢', async ($, on) => {
+  const { opened, timers } = await startInApp($, on, false)
+  expect(opened.length > 0).toBe(true)
+  expect(timers.length > 0).toBe(true)
+})
+
+test('issue-launcher 偵測看 HERDR_APP_HOME，沒設就用 ~/.config/herdr-app', async () => {
+  expect(LAUNCHER_ARGV.slice(0, 2)).toEqual(['sh', '-c'])
+  expect(LAUNCHER_ARGV[2]).toContain('${HERDR_APP_HOME:-$HOME/.config/herdr-app}/mods/issue-launcher/mod.json')
 })
